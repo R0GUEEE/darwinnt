@@ -513,9 +513,20 @@ int dnt_macho_parse(const void *data, size_t len, dnt_image *img)
              * it. A corrupted vmaddr here becomes a max_mapped near 2^63, and
              * every downstream size calculation then overflows. Real arm64
              * user images live far below 2^47. */
-            /* Mach-O segments are laid out back to back; the loader maps one
-             * contiguous span starting at the first segment. Anything else is
-             * corruption and must not become a wild-sized allocation. */
+            /* __PAGEZERO is a guard region at address 0 with no file content
+             * and no permissions. Every real Darwin executable has one; it is
+             * not mapped and must not be treated as geometry. */
+            if (memcmp(sc.segname, "__PAGEZERO", 10) == 0 &&
+                sc.filesize == 0) {
+                if (img->npages == 0 && img->nsegs == 0)
+                    img->pagesize_size = sc.vmsize;
+                img->npages++;
+                break;
+            }
+
+            /* Everything else is laid out back to back; the loader maps one
+             * contiguous span starting at the first real segment. Anything
+             * else is corruption and must not become a wild allocation. */
             if (sc.vmsize > DNT_MAX_SEG_SIZE ||
                 sc.vmaddr > (1ull << 47) ||
                 sc.vmaddr + sc.vmsize < sc.vmaddr ||
@@ -524,7 +535,9 @@ int dnt_macho_parse(const void *data, size_t len, dnt_image *img)
                 sc.fileoff > len ||
                 (uint64_t)sc.fileoff + sc.filesize > len)
                 return DNT_E_TRUNCATED;
-            if (img->nsegs > 0) {
+            if (img->nsegs == 0) {
+                img->base_vaddr = sc.vmaddr;   /* first real segment is the base */
+            } else {
                 uint64_t base = img->segs[0].vaddr;
                 if (sc.vmaddr < base)
                     return DNT_E_NOSEG;

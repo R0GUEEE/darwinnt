@@ -261,6 +261,17 @@ int dnt_port_closedir(dnt_dir *d)
     return 0;
 }
 
+dnt_handle_t dnt_port_std_handle(int which)
+{
+    /* The host's descriptors already are 0/1/2; verify they are open rather
+     * than assuming, so a closed stream reports EBADF like Darwin does. */
+    if (which < 0 || which > 2)
+        return DNT_HANDLE_INVALID;
+    if (fcntl(which, F_GETFD) < 0)
+        return DNT_HANDLE_INVALID;
+    return which;
+}
+
 int64_t dnt_port_now(void)
 {
     return (int64_t)time(NULL);

@@ -29,16 +29,56 @@
  * `host_cap`. Returns 0 or DNT_EFAULT. Mirrors copyinstr(): a string with no
  * terminator inside the cap is ENAMETOOLONG, not EFAULT. */
 /* Both are supplied by the host VM layer. They are weak here so that the
- * parser tests and tooling can link without a guest address space. */
+ * parser tests and tooling can link without a guest address space.
+ *
+ * On a host where the guest image simply lives at its own addresses (a POSIX
+ * process, where the interpreter dereferences real memory), the check that
+ * matters is that the span is inside a region the executor registered. */
 __attribute__((weak)) size_t dnt_u_read(uint64_t guest_addr, void *dst, size_t n)
 {
-    (void)guest_addr; (void)dst; (void)n;
-    return 0; /* no VM attached: every guest access faults */
+    if (!dnt_guest_range_ok(guest_addr, n))
+        return 0;
+    memcpy(dst, (const void *)(uintptr_t)guest_addr, n);
+    return n;
 }
 
 __attribute__((weak)) void dnt_u_write(uint64_t guest_addr, const void *src, size_t n)
 {
-    (void)guest_addr; (void)src; (void)n;
+    if (!dnt_guest_range_ok(guest_addr, n))
+        return;
+    memcpy((void *)(uintptr_t)guest_addr, src, n);
+}
+
+/* Guest memory regions, registered by the executor. Without a registration
+ * every access is refused, which is the safe default: it turns a wild guest
+ * pointer into EFAULT instead of a host crash. */
+typedef struct { uint64_t base, size; } dnt_region;
+#define DNT_MAX_GUEST_REGIONS 16
+static dnt_region g_regions[DNT_MAX_GUEST_REGIONS];
+static int g_nregions;
+
+void dnt_guest_register(uint64_t base, uint64_t size)
+{
+    if (g_nregions < DNT_MAX_GUEST_REGIONS) {
+        g_regions[g_nregions].base = base;
+        g_regions[g_nregions].size = size;
+        g_nregions++;
+    }
+}
+
+void dnt_guest_clear(void) { g_nregions = 0; }
+
+int dnt_guest_range_ok(uint64_t addr, uint64_t n)
+{
+    if (n == 0)
+        return 1;
+    if (addr + n < addr)
+        return 0;
+    for (int i = 0; i < g_nregions; i++) {
+        if (addr >= g_regions[i].base && addr + n <= g_regions[i].base + g_regions[i].size)
+            return 1;
+    }
+    return 0;
 }
 
 int dnt_u_strcpy(uint64_t guest_addr, char *host_dst, size_t host_cap,
@@ -56,6 +96,12 @@ int dnt_u_strcpy(uint64_t guest_addr, char *host_dst, size_t host_cap,
 }
 
 
+/* A syscall result: the value, and whether the call failed. Darwin returns
+ * both (x0 plus the carry flag), and read() of 2 bytes must not be
+ * indistinguishable from a failure with errno 2. */
+static dnt_result OK(uint64_t v)  { dnt_result r = { v, 0 }; return r; }
+static dnt_result ERR(int e)      { dnt_result r = { (uint64_t)e, 1 }; return r; }
+
 /* ---- filesystem handlers ---- */
 
 /* Read a guest path into host memory. Returns 0 or a Darwin errno. */
@@ -66,23 +112,23 @@ static int getpath(uint64_t guest_addr, char *buf, size_t cap)
     return dnt_u_strcpy(guest_addr, buf, cap, NULL);
 }
 
-static uint64_t sys_open(uint64_t path_addr, int flags, int mode)
+static dnt_result sys_open(uint64_t path_addr, int flags, int mode)
 {
     char path[DNT_MAXPATHLEN];
     int rc = getpath(path_addr, path, sizeof(path));
     if (rc)
-        return (uint64_t)rc;
+        return ERR(rc);
     int fd = dnt_vfs_open(path, flags, mode);
-    return fd < 0 ? (uint64_t)(-fd) : (uint64_t)fd;
+    return fd < 0 ? ERR(-fd) : OK((uint64_t)fd);
 }
 
-static uint64_t sys_close(uint64_t fd)
+static dnt_result sys_close(uint64_t fd)
 {
     int rc = dnt_vfs_close((int)fd);
-    return rc ? (uint64_t)rc : 0;
+    return rc ? ERR(rc) : OK(0);
 }
 
-static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t nbyte)
+static dnt_result sys_read(uint64_t fd, uint64_t buf_addr, uint64_t nbyte)
 {
     /* Bound the transfer: a guest asking for 4 GB is not a request we honour
      * by allocating it. Chunked reads let the caller loop, as read() allows. */
@@ -91,81 +137,81 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t nbyte)
         nbyte = chunk;
     char *tmp = malloc((size_t)nbyte ? (size_t)nbyte : 1);
     if (!tmp)
-        return DNT_ENOMEM;
+        return ERR(DNT_ENOMEM);
     int err = 0;
     int64_t r = dnt_vfs_read((int)fd, tmp, nbyte, &err);
     if (r > 0)
         dnt_u_write(buf_addr, tmp, (size_t)r);
     free(tmp);
     if (r < 0)
-        return (uint64_t)err;
-    return (uint64_t)r;
+        return ERR(err);
+    return OK(r);
 }
 
-static uint64_t sys_write(uint64_t fd, uint64_t buf_addr, uint64_t nbyte)
+static dnt_result sys_write(uint64_t fd, uint64_t buf_addr, uint64_t nbyte)
 {
     const uint64_t chunk = 1u << 20;
     if (nbyte > chunk)
         nbyte = chunk;
     char *tmp = malloc((size_t)nbyte ? (size_t)nbyte : 1);
     if (!tmp)
-        return DNT_ENOMEM;
+        return ERR(DNT_ENOMEM);
     size_t got = dnt_u_read(buf_addr, tmp, (size_t)nbyte);
     if (got != (size_t)nbyte) {
         free(tmp);
-        return DNT_EFAULT;
+        return ERR(DNT_EFAULT);
     }
     int err = 0;
     int64_t r = dnt_vfs_write((int)fd, tmp, nbyte, &err);
     free(tmp);
     if (r < 0)
-        return (uint64_t)err;
-    return (uint64_t)r;
+        return ERR(err);
+    return OK(r);
 }
 
-static uint64_t sys_lseek(uint64_t fd, int64_t off, int whence)
+static dnt_result sys_lseek(uint64_t fd, int64_t off, int whence)
 {
     int err = 0;
     int64_t r = dnt_vfs_lseek((int)fd, off, whence, &err);
-    return r < 0 ? (uint64_t)err : (uint64_t)r;
+    return r < 0 ? ERR(err) : OK(r);
 }
 
-static uint64_t sys_stat_common(uint64_t path_addr, uint64_t ub, int follow)
+static dnt_result sys_stat_common(uint64_t path_addr, uint64_t ub, int follow)
 {
     char path[DNT_MAXPATHLEN];
     int rc = getpath(path_addr, path, sizeof(path));
     if (rc)
-        return (uint64_t)rc;
+        return ERR(rc);
     if (!ub)
-        return DNT_EFAULT;
+        return ERR(DNT_EFAULT);
     dnt_stat st;
     rc = dnt_vfs_stat(path, &st, follow);
     if (rc)
-        return (uint64_t)rc;
+        return ERR(rc);
     dnt_u_write(ub, &st, sizeof(st));
-    return 0;
+    return OK(0);
 }
 
-static uint64_t sys_fstat(uint64_t fd, uint64_t ub)
+static dnt_result sys_fstat(uint64_t fd, uint64_t ub)
 {
     if (!ub)
-        return DNT_EFAULT;
+        return ERR(DNT_EFAULT);
     dnt_stat st;
     int rc = dnt_vfs_fstat((int)fd, &st);
     if (rc)
-        return (uint64_t)rc;
+        return ERR(rc);
     dnt_u_write(ub, &st, sizeof(st));
-    return 0;
+    return OK(0);
 }
 
-static uint64_t sys_getdirentries64(uint64_t fd, uint64_t buf_addr,
+static dnt_result sys_getdirentries64(uint64_t fd, uint64_t buf_addr,
                                    uint64_t bufsize, uint64_t base_addr)
 {
     if (bufsize > (1u << 20))
-        return DNT_EINVAL;
+        return ERR(DNT_EINVAL);
     char *tmp = malloc((size_t)bufsize ? (size_t)bufsize : 1);
     if (!tmp)
-        return DNT_ENOMEM;
+        return ERR(DNT_ENOMEM);
     int64_t base = 0;
     int64_t r = dnt_vfs_getdirentries64((int)fd, tmp, bufsize, &base);
     if (r >= 0) {
@@ -174,85 +220,85 @@ static uint64_t sys_getdirentries64(uint64_t fd, uint64_t buf_addr,
             dnt_u_write(base_addr, &base, sizeof(base));
     }
     free(tmp);
-    return r < 0 ? (uint64_t)(-r) : (uint64_t)r;
+    return r < 0 ? ERR(-r) : OK(r);
 }
 
-static uint64_t sys_chdir(uint64_t path_addr)
+static dnt_result sys_chdir(uint64_t path_addr)
 {
     char path[DNT_MAXPATHLEN];
     int rc = getpath(path_addr, path, sizeof(path));
     if (rc)
-        return (uint64_t)rc;
-    return (uint64_t)dnt_vfs_chdir(path);
+        return ERR(rc);
+    { int e = dnt_vfs_chdir(path); return e ? ERR(e) : OK(0); }
 }
 
-static uint64_t sys_unlink(uint64_t path_addr)
+static dnt_result sys_unlink(uint64_t path_addr)
 {
     char path[DNT_MAXPATHLEN];
     int rc = getpath(path_addr, path, sizeof(path));
     if (rc)
-        return (uint64_t)rc;
-    return (uint64_t)dnt_vfs_unlink(path);
+        return ERR(rc);
+    { int e = dnt_vfs_unlink(path); return e ? ERR(e) : OK(0); }
 }
 
-static uint64_t sys_mkdir(uint64_t path_addr, int mode)
+static dnt_result sys_mkdir(uint64_t path_addr, int mode)
 {
     char path[DNT_MAXPATHLEN];
     int rc = getpath(path_addr, path, sizeof(path));
     if (rc)
-        return (uint64_t)rc;
-    return (uint64_t)dnt_vfs_mkdir(path, mode);
+        return ERR(rc);
+    { int e = dnt_vfs_mkdir(path, mode); return e ? ERR(e) : OK(0); }
 }
 
-static uint64_t sys_rmdir(uint64_t path_addr)
+static dnt_result sys_rmdir(uint64_t path_addr)
 {
     char path[DNT_MAXPATHLEN];
     int rc = getpath(path_addr, path, sizeof(path));
     if (rc)
-        return (uint64_t)rc;
-    return (uint64_t)dnt_vfs_rmdir(path);
+        return ERR(rc);
+    { int e = dnt_vfs_rmdir(path); return e ? ERR(e) : OK(0); }
 }
 
-static uint64_t sys_rename(uint64_t from_addr, uint64_t to_addr)
+static dnt_result sys_rename(uint64_t from_addr, uint64_t to_addr)
 {
     char a[DNT_MAXPATHLEN], b[DNT_MAXPATHLEN];
     int rc = getpath(from_addr, a, sizeof(a));
-    if (rc) return (uint64_t)rc;
+    if (rc) return ERR(rc);
     rc = getpath(to_addr, b, sizeof(b));
-    if (rc) return (uint64_t)rc;
-    return (uint64_t)dnt_vfs_rename(a, b);
+    if (rc) return ERR(rc);
+    { int e = dnt_vfs_rename(a, b); return e ? ERR(e) : OK(0); }
 }
 
-static uint64_t sys_ftruncate(uint64_t fd, int64_t length)
+static dnt_result sys_ftruncate(uint64_t fd, int64_t length)
 {
     if (length < 0)
-        return DNT_EINVAL;
-    return (uint64_t)dnt_vfs_ftruncate((int)fd, (uint64_t)length);
+        return ERR(DNT_EINVAL);
+    { int e = dnt_vfs_ftruncate((int)fd, (uint64_t)length); return e ? ERR(e) : OK(0); }
 }
 
-static uint64_t sys_access(uint64_t path_addr, int mode)
+static dnt_result sys_access(uint64_t path_addr, int mode)
 {
     (void)mode;
     char path[DNT_MAXPATHLEN];
     int rc = getpath(path_addr, path, sizeof(path));
     if (rc)
-        return (uint64_t)rc;
+        return ERR(rc);
     dnt_stat st;
     rc = dnt_vfs_stat(path, &st, 1);
-    return rc ? (uint64_t)rc : 0;
+    return rc ? ERR(rc) : OK(0);
 }
 
-static uint64_t sys_fsync(uint64_t fd)
+static dnt_result sys_fsync(uint64_t fd)
 {
     /* Host backends flush on close; report success for a valid descriptor
      * rather than pretending to have called FlushFileBuffers. */
-    return dnt_vfs_get((int)fd) ? 0 : DNT_EBADF;
+    return dnt_vfs_get((int)fd) ? OK(0) : ERR(DNT_EBADF);
 }
 
-static uint64_t sys_dup2(uint64_t from, uint64_t to)
+static dnt_result sys_dup2(uint64_t from, uint64_t to)
 {
     (void)from; (void)to;
-    return DNT_ENOSYS;
+    return ERR(DNT_ENOSYS);
 }
 
 
@@ -273,44 +319,64 @@ const dnt_host_ops *dnt_host(void)
 }
 
 /* ---- generic handlers ---- */
-static uint64_t sys_exit_call(uint64_t code)
+static dnt_result sys_exit_call(uint64_t code)
 {
     /* proc_exit takes the full int; the 8-bit truncation Darwin is famous for
      * happens when the parent reads the wait status (WEXITSTATUS), not here. */
     if (g_ops.exit)
         g_ops.exit((int)code);
-    return 0;
+    return OK(0);
 }
 
-static uint64_t sys_getpid(void)  { return 42; }
-static uint64_t sys_getppid(void) { return 1; }
-static uint64_t sys_getuid(void)  { return 501; }   /* first normal Darwin uid */
-static uint64_t sys_getgid(void)  { return 20; }    /* staff */
-static uint64_t sys_geteuid(void) { return 501; }
-static uint64_t sys_getegid(void) { return 20; }
+static dnt_result sys_getpid(void)  { return OK(42); }
+static dnt_result sys_getppid(void) { return OK(1); }
+static dnt_result sys_getuid(void)  { return OK(501); }   /* first normal Darwin uid */
+static dnt_result sys_getgid(void)  { return OK(20); }    /* staff */
+static dnt_result sys_geteuid(void) { return OK(501); }
+static dnt_result sys_getegid(void) { return OK(20); }
 
-static uint64_t sys_gettimeofday(uint64_t tv_addr, uint64_t tz, uint64_t mach)
+static dnt_result sys_gettimeofday(uint64_t tv_addr, uint64_t tz, uint64_t mach)
 {
     (void)tz; (void)mach;
     if (!tv_addr)
-        return DNT_EFAULT;
+        return ERR(DNT_EFAULT);
     dnt_timeval tv;
     if (g_ops.gettimeofday) {
         g_ops.gettimeofday(&tv);
         dnt_u_write(tv_addr, &tv, sizeof(tv));
-        return 0;
+        return OK(0);
     }
-    return DNT_ENOSYS;
+    return ERR(DNT_ENOSYS);
+}
+
+/* The dispatcher is the only place that knows a handler's failure bit, so it
+ * is the only place that can present Darwin's x0 + carry correctly. */
+uint64_t dnt_syscall_ex(uint32_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
+                        uint64_t a3, uint64_t a4, uint64_t a5, int *is_error)
+{
+    dnt_result r = dnt_syscall_r(nr, a0, a1, a2, a3, a4, a5);
+    if (is_error)
+        *is_error = r.err;
+    return r.v;
 }
 
 uint64_t dnt_syscall(uint32_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
                      uint64_t a3, uint64_t a4, uint64_t a5)
 {
-    (void)g_initialised; (void)a3; (void)a4; (void)a5;
-    if (nr > DSYS_MAX_SYSCALL)
-        return (uint64_t)DNT_ENOSYS;
+    return dnt_syscall_r(nr, a0, a1, a2, a3, a4, a5).v;
+}
+
+dnt_result dnt_syscall_r(uint32_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
+                         uint64_t a3, uint64_t a4, uint64_t a5)
+{
+    if (nr > DSYS_MAX_SYSCALL) {
+        if (g_ops.unimplemented)
+            g_ops.unimplemented(nr, "out-of-range");
+        return ERR(DNT_ENOSYS);
+    }
 
     switch (nr) {
+
     case DSYS_EXIT:              return sys_exit_call(a0);
     case DSYS_GETPID:            return sys_getpid();
     case DSYS_GETPPID:           return sys_getppid();
@@ -333,7 +399,7 @@ uint64_t dnt_syscall(uint32_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case DSYS_SYS_FSTAT:         return sys_fstat(a0, a1);
     case DSYS_GETDIRENTRIES64:   return sys_getdirentries64(a0, a1, a2, a3);
     case DSYS_SYS_CHDIR:         return sys_chdir(a0);
-    case DSYS_SYS_FCHDIR:        return DNT_ENOSYS;
+    case DSYS_SYS_FCHDIR:        return ERR(DNT_ENOSYS);
     case DSYS_UNLINK:            return sys_unlink(a0);
     case DSYS_MKDIR:             return sys_mkdir(a0, (int)a1);
     case DSYS_RMDIR:             return sys_rmdir(a0);
@@ -345,11 +411,11 @@ uint64_t dnt_syscall(uint32_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
 
     default:
         if (g_ops.unimplemented)
-            g_ops.unimplemented(nr,
-                nr <= DSYS_MAX_SYSCALL ? dsys_table_name[nr] : "?");
-        return (uint64_t)DNT_ENOSYS;
+            g_ops.unimplemented(nr, dsys_table_name[nr]);
+        return ERR(DNT_ENOSYS);
     }
 }
+
 
 const char *dnt_syscall_name(uint32_t nr)
 {

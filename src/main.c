@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 /* darwinnt command line.
  *
  *   darwinnt <darwin-binary> [args...]     load and inspect a Mach-O image
@@ -8,12 +9,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include "dnt_abi.h"
 #include "dnt_macho.h"
 #include "dnt_path.h"
 #include "dnt_syscall.h"
 #include "dnt_vfs.h"
+#include "dnt_exec.h"
 #include "dnt_errno.h"
 #include "dnt_abi.h"
 
@@ -22,6 +25,38 @@
 #define DEFAULT_ROOT "C:\\DarwinRoot"
 #else
 #define DEFAULT_ROOT ".\\DarwinRoot"
+
+/* Host services for non-Windows builds: the same contract the Win32 runtime
+ * provides, so behaviour is identical on Linux (and CI exercises it). */
+static void posix_exit(int code)
+{
+    fflush(stdout);
+    exit(code);
+}
+
+static void posix_gettimeofday(dnt_timeval *tv)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    tv->tv_sec = (dnt_time_t)ts.tv_sec;
+    tv->tv_usec = (dnt_suseconds_t)(ts.tv_nsec / 1000);
+}
+
+static void posix_unimplemented(uint32_t nr, const char *name)
+{
+    static uint8_t seen[1024];
+    if (nr < sizeof(seen) && !seen[nr]) {
+        seen[nr] = 1;
+        fprintf(stderr, "[dnt] syscall %u (%s) not implemented -> ENOSYS\n",
+                nr, name ? name : "?");
+    }
+}
+
+static const dnt_host_ops *posix_host_ops(void)
+{
+    static dnt_host_ops ops = { posix_exit, posix_gettimeofday, posix_unimplemented };
+    return &ops;
+}
 #endif
 
 static uint8_t *read_file(const char *path, size_t *out_len)
@@ -99,6 +134,27 @@ static int cmd_translate(const char *p)
 
 /* Filesystem smoke test using the real port backend. CI runs this on Windows
  * so the Win32 layer is executed, not just compiled. */
+static int cmd_run(const char *path, int verbose)
+{
+    size_t len = 0;
+    uint8_t *data = read_file(path, &len);
+    if (!data) {
+        fprintf(stderr, "cannot read %s\n", path);
+        return 2;
+    }
+    const char *root = getenv("DARWINNT_ROOT");
+    if (!root || !*root) root = DEFAULT_ROOT;
+
+    dnt_exec_result r;
+    int rc = dnt_exec_image(data, len, root, verbose, &r);
+    free(data);
+    if (rc != 0) {
+        fprintf(stderr, "darwinnt: %s\n", r.detail);
+        return rc == -1 ? 1 : 3;
+    }
+    return r.exit_code;
+}
+
 static int self_test_fs(void)
 {
     char root[512];
@@ -173,6 +229,8 @@ int main(int argc, char **argv)
 {
 #ifdef _WIN32
     dnt_syscall_init(dnt_win_host_ops());
+#else
+    dnt_syscall_init(posix_host_ops());
 #endif
     if (argc < 2) {
         fprintf(stderr,
@@ -180,6 +238,7 @@ int main(int argc, char **argv)
             "usage:\n"
             "  darwinnt --info <mach-o-binary>\n"
             "  darwinnt --translate <darwin-path>\n"
+            "  darwinnt --run <darwin-binary>\n"
             "  darwinnt --test\n");
         return 1;
     }
@@ -187,6 +246,8 @@ int main(int argc, char **argv)
         return cmd_info(argv[2]);
     if (strcmp(argv[1], "--translate") == 0 && argc > 2)
         return cmd_translate(argv[2]);
+    if (strcmp(argv[1], "--run") == 0 && argc > 2)
+        return cmd_run(argv[2], argc > 3);
     if (strcmp(argv[1], "--test") == 0)
         return self_test();
     if (strcmp(argv[1], "--selftest-fs") == 0)

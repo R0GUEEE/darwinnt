@@ -29,12 +29,23 @@ jobs:
           & $gcc -std=c11 -Wall -Wextra -Wpedantic -O2 -static -Iinclude -Isrc `
             src/main.c src/dnt_macho.c src/dnt_path.c src/dnt_syscall.c `
             src/dnt_vfs.c src/dnt_port_win.c src/dnt_win.c `
+            src/dnt_cpu.c src/dnt_exec.c `
             -o build/darwinnt.exe
           if ($LASTEXITCODE -ne 0) { throw "build failed" }
           & build\darwinnt.exe --test
           & build\darwinnt.exe --translate /var/tmp/example
           & build\darwinnt.exe --selftest-fs
           if ($LASTEXITCODE -ne 0) { throw "filesystem self-test failed" }
+
+      - name: Execute real Darwin binaries
+        shell: pwsh
+        run: |
+          # The fixtures are checked in, built on Linux by the tests job, or by
+          # tools/build-fixtures.sh locally. Verify a guest program really runs.
+          & build\darwinnt.exe --run tests\fixtures\hello.macho
+          if ($LASTEXITCODE -ne 0) { throw "hello.macho failed" }
+          & build\darwinnt.exe --run tests\fixtures\exitcode.macho
+          if ($LASTEXITCODE -ne 42) { throw "exitcode.macho returned $LASTEXITCODE, expected 42" }
           Get-Item build\darwinnt.exe | Select-Object Name,Length
 
       - uses: actions/upload-artifact@v4
@@ -50,6 +61,22 @@ jobs:
       - uses: actions/checkout@v4
       - name: Regenerate syscall table
         run: python3 tools/gen_syscalls.py spec/master.txt src/generated/syscalls.h
+      - name: Install clang + lld (fixture toolchain)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld
+
+      - name: Build Mach-O fixtures with the real toolchain
+        run: |
+          set -e
+          # ld64.lld ships with the lld package on Ubuntu
+          if ! command -v ld64.lld >/dev/null; then
+            for c in ld64.lld /usr/lib/llvm-*/bin/ld64.lld; do
+              [ -x "$c" ] && ln -sf "$c" /usr/local/bin/ld64.lld && break
+            done
+          fi
+          sh tools/build-fixtures.sh
+
       - name: Build and run suites
         run: |
           set -e
@@ -66,8 +93,12 @@ jobs:
           ./build_test_macho
           ./build_test_path
           ./build_test_syscall
+          $CC $I tests/test_exec.c src/dnt_exec.c src/dnt_cpu.c src/dnt_syscall.c \
+              src/dnt_macho.c src/dnt_vfs.c src/dnt_path.c src/dnt_port_posix.c \
+              -o build_test_exec
           ./build_test_vfs
           ./build_test_syscalls_fs
+          ./build_test_exec
       - name: Fuzz the Mach-O parser
         run: |
           cat > fuzz_main.c <<'EOF'

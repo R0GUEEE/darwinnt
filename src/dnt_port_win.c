@@ -329,6 +329,22 @@ int dnt_port_closedir(dnt_dir *d)
     return 0;
 }
 
+dnt_handle_t dnt_port_std_handle(int which)
+{
+    DWORD id;
+    switch (which) {
+    case 0:  id = STD_INPUT_HANDLE;  break;
+    case 1:  id = STD_OUTPUT_HANDLE; break;
+    case 2:  id = STD_ERROR_HANDLE;  break;
+    default: return DNT_HANDLE_INVALID;
+    }
+    HANDLE h = GetStdHandle(id);
+    if (h == INVALID_HANDLE_VALUE || h == NULL)
+        return DNT_HANDLE_INVALID;
+    /* Do NOT close these: they belong to the process, not to the fd table. */
+    return (dnt_handle_t)h;
+}
+
 int64_t dnt_port_now(void)
 {
     FILETIME ft;

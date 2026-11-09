@@ -101,14 +101,16 @@ int dnt_vfs_init(const char *root)
         dnt_port_mkdir(host);   /* EEXIST is expected and ignored */
     }
 
-    /* 0,1,2 are the standard streams. They are real descriptors with host
-     * handles attached by the launcher; mark them open and inheritable. */
+    /* 0,1,2 are the standard streams. They must carry real host handles:
+     * leaving them as DNT_HANDLE_INVALID made write(1, ...) fail with EBADF
+     * from the host instead of reaching the console. */
     for (int i = 0; i < 3; i++) {
         g_fds[i].in_use = 1;
         g_fds[i].fd = i;
-        g_fds[i].flags = (i == 0) ? DNT_O_RDONLY : DNT_O_WRONLY;
+        g_fds[i].flags = (i == 0) ? DNT_O_RDONLY : ((i == 1) ? DNT_O_WRONLY : DNT_O_RDWR);
         g_fds[i].is_tty = 1;
-        g_fds[i].handle = DNT_HANDLE_INVALID;
+        g_fds[i].handle = dnt_port_std_handle(i);
+        g_fds[i].host_path[0] = 0;
     }
     return 0;
 }

@@ -59,6 +59,10 @@ int      dnt_port_readdir(dnt_dir *d, char *name, size_t name_cap,
                           uint64_t *ino, int *type, int *err);
 int      dnt_port_closedir(dnt_dir *d);
 
+/* Host handle for guest fd 0/1/2. Returns DNT_HANDLE_INVALID if the stream
+ * is closed, so writes to it fail with EBADF exactly as on Darwin. */
+dnt_handle_t dnt_port_std_handle(int which);
+
 /* Pre-1970-clamped current time in Unix seconds. */
 int64_t dnt_port_now(void);
 

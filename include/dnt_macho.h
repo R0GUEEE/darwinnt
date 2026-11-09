@@ -128,6 +128,8 @@ typedef struct dnt_image {
     const uint8_t *chained_fixups;
     uint64_t chained_fixups_size;
 
+    int      npages;             /* __PAGEZERO segments seen (skipped when mapping) */
+    uint64_t pagesize_size;      /* size of the guard region, for host setup */
     uint64_t max_mapped;         /* bytes the caller must map from base_vaddr */
     uint32_t unsupported_fixups;
 } dnt_image;

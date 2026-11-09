@@ -11,7 +11,7 @@ SANFLAGS = -g
 endif
 
 SRC_COMMON = src/dnt_macho.c src/dnt_path.c src/dnt_syscall.c src/dnt_vfs.c \
-             src/dnt_port_posix.c
+             src/dnt_port_posix.c src/dnt_cpu.c src/dnt_exec.c
 SRC_HOST   = src/main.c $(SRC_COMMON)
 
 all: build/darwinnt
@@ -38,14 +38,21 @@ build/test_syscall: tests/test_syscall.c src/dnt_syscall.c src/generated/syscall
 build/test_vfs: tests/test_vfs.c src/dnt_vfs.c src/dnt_path.c src/dnt_port_posix.c | build
 	$(CC) $(CFLAGS) $(SANFLAGS) $^ -o $@
 
+build/test_exec: tests/test_exec.c src/dnt_exec.c src/dnt_cpu.c src/dnt_syscall.c \
+                 src/dnt_macho.c src/dnt_vfs.c src/dnt_path.c src/dnt_port_posix.c \
+                 src/generated/syscalls.h | build
+	$(CC) $(CFLAGS) $(SANFLAGS) tests/test_exec.c src/dnt_exec.c src/dnt_cpu.c \
+	  src/dnt_syscall.c src/dnt_macho.c src/dnt_vfs.c src/dnt_path.c \
+	  src/dnt_port_posix.c -o $@
+
 build/test_syscalls_fs: tests/test_syscalls_fs.c src/dnt_syscall.c src/dnt_vfs.c \
                         src/dnt_path.c src/dnt_port_posix.c src/generated/syscalls.h | build
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/test_syscalls_fs.c src/dnt_syscall.c src/dnt_vfs.c \
 	  src/dnt_path.c src/dnt_port_posix.c -o $@
 
-check: build/test_macho build/test_path build/test_syscall build/test_vfs build/test_syscalls_fs
+check: build/test_macho build/test_path build/test_syscall build/test_vfs build/test_syscalls_fs build/test_exec
 	./build/test_macho && ./build/test_path && ./build/test_syscall \
-	  && ./build/test_vfs && ./build/test_syscalls_fs
+	  && ./build/test_vfs && ./build/test_syscalls_fs && ./build/test_exec
 
 clean:
 	rm -rf build
