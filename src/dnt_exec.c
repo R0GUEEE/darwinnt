@@ -21,7 +21,9 @@
 #include <windows.h>
 #endif
 
-static uint8_t *map_region(uint64_t want, uint64_t *out_base)
+/* `why` receives a human-readable reason on failure; CI prints it. A NULL
+ * return with no explanation is what made the last Windows failure opaque. */
+static uint8_t *map_region(uint64_t want, uint64_t *out_base, char *why, size_t why_cap)
 {
 #ifdef _WIN32
     /* The interpreter dereferences guest addresses as native pointers, and
@@ -37,14 +39,26 @@ static uint8_t *map_region(uint64_t want, uint64_t *out_base)
         p = VirtualAlloc((void *)(uintptr_t)*out_base, (SIZE_T)want,
                          MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     }
-    if (!p)
+    if (!p) {
+#ifdef _WIN32
+        snprintf(why, why_cap, "VirtualAlloc(%llu bytes at 0x%llx) failed, err=%lu",
+                 (unsigned long long)want, (unsigned long long)*out_base,
+                 (unsigned long)GetLastError());
+#else
+        snprintf(why, why_cap, "VirtualAlloc(%llu bytes) failed",
+                 (unsigned long long)want);
+#endif
         return NULL;
+    }
     *out_base = (uint64_t)(uintptr_t)p;
     return (uint8_t *)p;
 #else
     void *p = aligned_alloc(4096, (size_t)((want + 0xFFF) & ~0xFFFull));
-    if (!p)
+    if (!p) {
+        snprintf(why, why_cap, "aligned_alloc(%llu bytes) failed",
+                 (unsigned long long)want);
         return NULL;
+    }
     memset(p, 0, (size_t)want);
     *out_base = (uint64_t)(uintptr_t)p;
     return (uint8_t *)p;
@@ -94,12 +108,11 @@ int dnt_exec_image(const uint8_t *file, size_t file_len, const char *root,
      * link_base, addresses the CPU executes against use the mapped base. */
     uint64_t link_base = image_base;
     uint64_t want_base = image_base;
-    uint8_t *mem = map_region(image_size, &image_base);
+    char why[200] = {0};
+    uint8_t *mem = map_region(image_size, &image_base, why, sizeof(why));
     if (!mem) {
         out->error = DNT_E_NOMEM;
-        snprintf(out->detail, sizeof(out->detail),
-                 "cannot map %llu bytes at 0x%llx",
-                 (unsigned long long)image_size, (unsigned long long)image_base);
+        snprintf(out->detail, sizeof(out->detail), "cannot map image: %s", why);
         return DNT_E_NOMEM;
     }
     out->image_base = image_base;
@@ -120,11 +133,11 @@ int dnt_exec_image(const uint8_t *file, size_t file_len, const char *root,
      * wherever the OS likes; nothing in the guest refers to it by address. */
     const uint64_t stack_size = 1 << 16;
     uint64_t stack_base = 0;
-    uint8_t *stack = map_region(stack_size, &stack_base);
+    uint8_t *stack = map_region(stack_size, &stack_base, why, sizeof(why));
     if (!stack) {
         unmap_region(mem, image_size);
         out->error = DNT_E_NOMEM;
-        snprintf(out->detail, sizeof(out->detail), "cannot map stack");
+        snprintf(out->detail, sizeof(out->detail), "cannot map stack: %s", why);
         return DNT_E_NOMEM;
     }
 
