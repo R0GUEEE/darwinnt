@@ -24,14 +24,19 @@
 static uint8_t *map_region(uint64_t want, uint64_t *out_base)
 {
 #ifdef _WIN32
-    /* Prefer the address the image was linked at, so absolute references and
-     * the guest's own PC arithmetic agree with the file. If that address is
-     * taken (ASLR, another module), map anywhere and let the executor resolve
-     * addresses against where it actually landed. */
-    void *p = VirtualAlloc((void *)(uintptr_t)*out_base, (SIZE_T)want,
-                           MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    if (!p)
+    /* The interpreter dereferences guest addresses as native pointers, and
+     * the image is linked for a fixed virtual address (0x100000000 on arm64).
+     * It MUST land there or every PC-relative access is wrong, so mapping
+     * elsewhere is a hard failure rather than a silent slide.
+     *
+     * A requested base of 0 means "anywhere", used only for the stack. */
+    void *p;
+    if (*out_base == 0) {
         p = VirtualAlloc(NULL, (SIZE_T)want, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    } else {
+        p = VirtualAlloc((void *)(uintptr_t)*out_base, (SIZE_T)want,
+                         MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    }
     if (!p)
         return NULL;
     *out_base = (uint64_t)(uintptr_t)p;
