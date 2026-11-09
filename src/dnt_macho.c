@@ -368,6 +368,21 @@ static void walk_chained(dnt_image *img, uint8_t *image, dnt_bind_cb cb, void *u
 
             for (int k = 0; k < n_starts; k++) {
                 uint64_t page_base = seg_mem_off + (uint64_t)pg * page_size;
+                /* `seg_mem_off` comes from the file and is guest-controlled.
+                 * If it does not fall inside a segment we actually mapped, a
+                 * corrupted blob would walk the chain through arbitrary
+                 * memory. Refuse instead of trusting it. */
+                const dnt_seg *host_seg = NULL;
+                for (int q = 0; q < img->nsegs; q++) {
+                    if (seg_mem_off == img->segs[q].vaddr - img->base_vaddr) {
+                        host_seg = &img->segs[q];
+                        break;
+                    }
+                }
+                if (!host_seg)
+                    continue;
+                if ((uint64_t)(pg + 1) * page_size > host_seg->memsz)
+                    continue;
                 uint8_t *slot = image_base + page_base + (starts_local[k] & 0x7FFF);
                 /* Chain must stay within this page: a corrupt `next` stride
                  * would otherwise walk into unmapped memory. */

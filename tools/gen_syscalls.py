@@ -123,6 +123,7 @@ def main():
         f.write(" * Do not edit. Regenerate: python3 tools/gen_syscalls.py spec/master.txt src/generated/syscalls.h\n")
         f.write(f" * {len(calls)} named calls, max number {maxn}.\n */\n")
         f.write("#ifndef DSYS_SYSCALLS_H\n#define DSYS_SYSCALLS_H\n\n")
+        f.write("#include <stddef.h>  /* NULL, used by the name table */\n\n")
         f.write(f"#define DSYS_MAX_SYSCALL {maxn}\n\n")
         f.write("enum dsys_call {\n")
         f.write("\n".join(enum_lines))

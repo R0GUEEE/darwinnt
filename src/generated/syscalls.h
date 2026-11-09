@@ -5,6 +5,8 @@
 #ifndef DSYS_SYSCALLS_H
 #define DSYS_SYSCALLS_H
 
+#include <stddef.h>  /* NULL, used by the name table */
+
 #define DSYS_MAX_SYSCALL 557
 
 enum dsys_call {
