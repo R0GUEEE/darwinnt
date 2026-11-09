@@ -92,6 +92,17 @@ static void trap(dnt_cpu *c)
      * dispatcher overwrites x0 with its (success) return value. */
     uint64_t exit_arg = c->x[0];
     int failed = 0;
+    /* exit must stop the machine BEFORE the dispatcher is called: the host
+     * exit hook terminates the process on Win32, so letting it run first means
+     * the CPU never observes the halt, the stack is never freed, and the CLI
+     * cannot return the guest's code. Handle it entirely here. */
+    if (nr == DSYS_EXIT) {
+        c->halt = DNT_HALT_EXIT;
+        c->exit_code = (int)(exit_arg & 0xFF);
+        c->x[0] = 0;
+        return;
+    }
+
     uint64_t r = dnt_syscall_ex(nr, c->x[0], c->x[1], c->x[2],
                                 c->x[3], c->x[4], c->x[5], &failed);
     /* Darwin's convention: x0 = result, carry flag = failure (x0 then holds
@@ -104,13 +115,6 @@ static void trap(dnt_cpu *c)
         c->nzcv &= ~F_C;
     c->syscall_error = failed;
 
-    /* exit() must stop the machine. The dispatcher reaches the host through
-     * an exit hook; if the host did not terminate us, treat it as a halt. */
-    if (nr == 1) {
-        c->halt = DNT_HALT_EXIT;
-        c->exit_code = (int)(exit_arg & 0xFF);
-        return;
-    }
 }
 
 /* ---- main loop ---- */
