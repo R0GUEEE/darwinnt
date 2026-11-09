@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 #include "dnt_port.h"
 #include "dnt_abi.h"
@@ -241,7 +242,36 @@ static int wide_call(int which, const char *a, const char *b)
 }
 
 int dnt_port_unlink(const char *host_path) { return wide_call(0, host_path, NULL); }
-int dnt_port_mkdir(const char *host_path)  { return wide_call(1, host_path, NULL); }
+/* CreateDirectoryW makes exactly one level. The VFS asks for one directory at
+ * a time, but the parent set above it may not exist yet on a fresh root (and
+ * an API caller doing mkdir("/a/b/c") expects Darwin's ENOENT-with-parent-
+ * missing only when it asked for that). Creating the chain here keeps the
+ * contract the POSIX backend already satisfies. */
+int dnt_port_mkdir(const char *host_path)
+{
+    wchar_t w[4096];
+    if (!MultiByteToWideChar(CP_UTF8, 0, host_path, -1, w, 4096))
+        return DNT_EINVAL;
+
+    for (wchar_t *p = w + 1; *p; p++) {
+        if (*p != L'\\' && *p != L'/')
+            continue;
+        wchar_t save = *p;
+        *p = 0;
+        if (wcslen(w) > 3 || (wcslen(w) == 3 && w[1] != L':'))
+            CreateDirectoryW(w, NULL);   /* EEXIST / ENOENT handled below */
+        *p = save;
+    }
+    if (CreateDirectoryW(w, NULL))
+        return 0;
+    DWORD e = GetLastError();
+    if (e == ERROR_ALREADY_EXISTS) {
+        DWORD attr = GetFileAttributesW(w);
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
+            return DNT_EEXIST;   /* exists as a directory: caller's problem */
+    }
+    return err_from_win(e);
+}
 int dnt_port_rmdir(const char *host_path)  { return wide_call(2, host_path, NULL); }
 int dnt_port_rename(const char *f, const char *t) { return wide_call(3, f, t); }
 int dnt_port_is_dir(const char *host_path) { return wide_call(4, host_path, NULL); }
