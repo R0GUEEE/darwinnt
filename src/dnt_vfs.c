@@ -84,23 +84,20 @@ int dnt_vfs_init(const char *root)
 #endif
     strcpy(g_cwd, "/");
 
-    /* Every Darwin root has these; a guest that opens /tmp/x or /var/db/y on
-     * first use must not fail just because the host tree was built lazily.
-     * Create-if-missing is silent: existing directories keep their identity. */
+    /* Darwin's root has these directories, and /var, /tmp, /etc are links
+     * into /private. The translator already rewrites those three prefixes, so
+     * only the /private side needs to exist as real directories -- no links
+     * required, which is what makes this work identically on Win32. */
     static const char *const skeleton[] = {
-        "private/tmp", "private/var/tmp", "private/var/db", "private/etc",
-        "usr/bin", "usr/lib", "usr/local/bin", "usr/share", "dev", "tmp", "var",
+        "/private", "/private/tmp", "/private/var/tmp", "/private/var/db",
+        "/private/var/log", "/private/etc",
+        "/usr", "/usr/bin", "/usr/lib", "/usr/local/bin", "/usr/share",
+        "/dev", "/bin", "/sbin",
     };
     for (size_t i = 0; i < sizeof(skeleton) / sizeof(skeleton[0]); i++) {
         char host[DNT_MAXPATHLEN + 128];
-        if (dnt_path_translate(root, "/", 0, host, sizeof(host)) != DNT_PATH_OK)
+        if (dnt_path_translate(root, skeleton[i], 0, host, sizeof(host)) != DNT_PATH_OK)
             break;
-        size_t hl = strlen(host);
-        if (hl && host[hl - 1] != '/' && host[hl - 1] != '\\')
-            host[hl] = '/';   /* keep it simple: POSIX-style join for mkdir */
-        else
-            hl--;
-        snprintf(host + hl + 1, sizeof(host) - hl - 1, "%s", skeleton[i]);
         dnt_port_mkdir(host);   /* EEXIST is expected and ignored */
     }
 
