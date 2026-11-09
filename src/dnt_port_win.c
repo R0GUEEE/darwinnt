@@ -24,6 +24,16 @@
 #include "dnt_abi.h"
 #include "dnt_errno.h"
 
+static dnt_out_fn g_out;
+static void *g_out_user;
+
+void dnt_port_set_output(dnt_out_fn fn, void *user)
+{
+    g_out = fn;
+    g_out_user = user;
+}
+
+
 struct dnt_dir {
     HANDLE            find;
     WIN32_FIND_DATAW  fd;
@@ -127,6 +137,14 @@ int64_t dnt_port_read(dnt_handle_t h, void *buf, uint64_t n, int *err)
 
 int64_t dnt_port_write(dnt_handle_t h, const void *buf, uint64_t n, int *err)
 {
+    if (g_out) {
+        HANDLE sh = (HANDLE)h;
+        if (sh == GetStdHandle(STD_OUTPUT_HANDLE) || sh == GetStdHandle(STD_ERROR_HANDLE)) {
+            g_out(sh == GetStdHandle(STD_OUTPUT_HANDLE) ? 1 : 2,
+                  (const char *)buf, n, g_out_user);
+            return (int64_t)n;
+        }
+    }
     DWORD put = 0;
     if (!WriteFile((HANDLE)h, buf, (DWORD)n, &put, NULL)) {
         if (err) *err = err_from_win(GetLastError());

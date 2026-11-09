@@ -55,6 +55,21 @@ jobs:
           if ($code -ne 42) { throw "exitcode.macho returned $code, expected 42" }
           Get-Item build\darwinnt.exe | Select-Object Name,Length
 
+      - name: Build GUI (darwinnt-gui.exe)
+        shell: pwsh
+        run: |
+          $gcc = "C:\ProgramData\chocolatey\bin\x86_64-w64-mingw32-gcc.exe"
+          if (!(Test-Path $gcc)) { $gcc = (Get-Command x86_64-w64-mingw32-gcc).Source }
+          & $gcc -std=c11 -Wall -Wextra -O2 -static -municode -mwindows `
+            -Iinclude -Isrc `
+            src/gui_win.c src/dnt_macho.c src/dnt_path.c src/dnt_syscall.c `
+            src/dnt_vfs.c src/dnt_port_win.c src/dnt_win.c `
+            src/dnt_cpu.c src/dnt_exec.c src/dnt_bind.c `
+            -lcomdlg32 -lgdi32 -luser32 -lshell32 `
+            -o build\darwinnt-gui.exe
+          if ($LASTEXITCODE -ne 0) { throw "gui build failed" }
+          Get-Item build\darwinnt-gui.exe | Select-Object Name,Length
+
       - uses: actions/upload-artifact@v4
         with:
           name: darwinnt-windows-x64

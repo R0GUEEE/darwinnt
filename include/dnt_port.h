@@ -59,6 +59,14 @@ int      dnt_port_readdir(dnt_dir *d, char *name, size_t name_cap,
                           uint64_t *ino, int *type, int *err);
 int      dnt_port_closedir(dnt_dir *d);
 
+/* Output sink. A guest writing to fd 1/2 goes here. Console builds point it at
+ * stdout; the GUI points it at a text control. NULL means "use the host
+ * console stream", so existing behaviour is unchanged. */
+typedef void (*dnt_out_fn)(int stream /*1=stdout,2=stderr*/, const char *buf,
+                           uint64_t len, void *user);
+
+void dnt_port_set_output(dnt_out_fn fn, void *user);
+
 /* Host handle for guest fd 0/1/2. Returns DNT_HANDLE_INVALID if the stream
  * is closed, so writes to it fail with EBADF exactly as on Darwin. */
 dnt_handle_t dnt_port_std_handle(int which);

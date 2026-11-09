@@ -22,6 +22,16 @@
 #include <time.h>
 #include <unistd.h>
 
+static dnt_out_fn g_out;
+static void *g_out_user;
+
+void dnt_port_set_output(dnt_out_fn fn, void *user)
+{
+    g_out = fn;
+    g_out_user = user;
+}
+
+
 struct dnt_dir {
     DIR *d;
     char path[4096];   /* needed to lstat entries when d_type is unknown */
@@ -118,6 +128,12 @@ int64_t dnt_port_read(dnt_handle_t h, void *buf, uint64_t n, int *err)
 
 int64_t dnt_port_write(dnt_handle_t h, const void *buf, uint64_t n, int *err)
 {
+    /* stdout/stderr may be redirected to a sink (the GUI). The sink is a
+     * writer, so it reports full acceptance like a terminal would. */
+    if (g_out && (h == 1 || h == 2)) {
+        g_out(h == 1 ? 1 : 2, (const char *)buf, n, g_out_user);
+        return (int64_t)n;
+    }
     ssize_t r = write(h, buf, (size_t)n);
     if (r < 0) { if (err) *err = map_errno(errno); return -1; }
     return (int64_t)r;
