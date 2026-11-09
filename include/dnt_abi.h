@@ -122,6 +122,7 @@ typedef struct {
 #define DNT_O_TRUNC    0x0400
 #define DNT_O_EXCL     0x0800
 #define DNT_O_EVTONLY  0x8000
+#define DNT_O_DIRECTORY 0x100000
 #define DNT_O_CLOEXEC  0x1000000
 
 /* ---- mmap flags ---- */

@@ -46,22 +46,32 @@ int dnt_path_translate(const char *root, const char *darwin_path,
     memcpy(out, root, rlen);
     o = rlen;
 
+    /* Separator handling differs by host shape. A Windows root ("C:\\x" or a
+     * UNC path) uses backslashes; a POSIX root ("/tmp/x") must keep forward
+     * slashes and its leading one, or every translated path becomes relative. */
+    const int posix_root = (root[0] == '/');
+    const char sep = posix_root ? '/' : '\\';
+    if (!posix_root) {
+        for (size_t i = 0; i < o; i++)
+            if (out[i] == '/')
+                out[i] = '\\';
+    }
+
     /* Darwin canonicalises these three vnodes into /private. Guests stat()
      * /var/tmp and open() /var/tmp and must land on one inode, so rewrite the
      * prefix exactly like the kernel's root vnode link does. */
     const char *p = darwin_path;
-    struct { const char *from; const char *to; } rewrites[] = {
-        { "/var",  "\\private\\var" },
-        { "/tmp",  "\\private\\tmp" },
-        { "/etc",  "\\private\\etc" },
-    };
-    for (size_t i = 0; i < sizeof(rewrites) / sizeof(rewrites[0]); i++) {
-        size_t fl = strlen(rewrites[i].from);
-        if (strncmp(darwin_path, rewrites[i].from, fl) == 0 &&
+    static const char *const froms[] = { "/var", "/tmp", "/etc" };
+    static const char *const tos[]   = { "/private/var", "/private/tmp", "/private/etc" };
+    size_t nrew = 3;
+    for (size_t i = 0; i < nrew; i++) {
+        size_t fl = strlen(froms[i]);
+        if (strncmp(darwin_path, froms[i], fl) == 0 &&
             (darwin_path[fl] == '/' || darwin_path[fl] == 0)) {
-            size_t tl = strlen(rewrites[i].to);
-            memcpy(out + o, rewrites[i].to, tl);
-            o += tl;
+            /* Emit the replacement using the host's separator. */
+            const char *t = tos[i];
+            for (; *t; t++)
+                out[o++] = (*t == '/') ? sep : *t;
             p = darwin_path + fl;
             break;
         }
@@ -73,10 +83,6 @@ int dnt_path_translate(const char *root, const char *darwin_path,
 
     int had_trailing = o > 0 && (out[o - 1] == '/');
 
-    /* '/' -> '\' in one pass over the whole buffer. */
-    for (size_t i = 0; i < o; i++)
-        if (out[i] == '/')
-            out[i] = '\\';
 
     /* Collapse "." and ".." components. walk separates "<root>" from the
      * guest part so a ".." that would climb above / is detected even when the
@@ -85,13 +91,20 @@ int dnt_path_translate(const char *root, const char *darwin_path,
     int depth = 0;              /* components below root */
     int escaped_root = 0;
     int comp = 0;               /* 0 = still copying root prefix */
+    /* A POSIX absolute root keeps its leading separator; Windows roots are
+     * "C:" or UNC and must not gain one. */
+    if (posix_root) {
+        out[w++] = sep;
+        while (r < o && (out[r] == '\\' || out[r] == '/'))
+            r++;
+    }
     while (r < o) {
-        while (r < o && out[r] == '\\')
+        while (r < o && (out[r] == '\\' || out[r] == '/'))
             r++;
         if (r >= o)
             break;
         size_t cs = r;
-        while (r < o && out[r] != '\\')
+        while (r < o && out[r] != '\\' && out[r] != '/')
             r++;
         size_t cl = r - cs;
 
@@ -105,14 +118,14 @@ int dnt_path_translate(const char *root, const char *darwin_path,
         if (!in_root && is_dotdot) {
             if (depth == 0) { escaped_root = 1; continue; }
             depth--;
-            while (w > 0 && out[w - 1] != '\\')
+            while (w > 0 && out[w - 1] != '\\' && out[w - 1] != '/')
                 w--;
             if (w > 0)
                 w--;
             continue;
         }
-        if (w > 0)
-            out[w++] = '\\';
+        if (w > 0 && out[w - 1] != sep)
+            out[w++] = sep;
         if (w != cs)
             memmove(out + w, out + cs, cl);
         w += cl;
@@ -125,12 +138,12 @@ int dnt_path_translate(const char *root, const char *darwin_path,
         return DNT_PATH_ESCAPE;
 
     if (preserve_trailing_slash && had_trailing && w + 1 < out_cap) {
-        out[w++] = '\\';
+        out[w++] = sep;
         out[w] = 0;
     }
     /* Darwin root itself maps to "<root>\" so joins behave. */
     if (w == 0 || (w == rlen && depth == 0 && o > rlen)) {
-        out[w++] = '\\';
+        out[w++] = sep;
         out[w] = 0;
     }
     return DNT_PATH_OK;

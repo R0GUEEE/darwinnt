@@ -13,6 +13,9 @@
 #include "dnt_macho.h"
 #include "dnt_path.h"
 #include "dnt_syscall.h"
+#include "dnt_vfs.h"
+#include "dnt_errno.h"
+#include "dnt_abi.h"
 
 #ifdef _WIN32
 #include "dnt_win.h"
@@ -94,6 +97,45 @@ static int cmd_translate(const char *p)
     return 0;
 }
 
+/* Filesystem smoke test using the real port backend. CI runs this on Windows
+ * so the Win32 layer is executed, not just compiled. */
+static int self_test_fs(void)
+{
+    char root[512];
+    const char *tmp = getenv("TEMP");
+    if (!tmp || !*tmp) tmp = getenv("TMP");
+    if (!tmp || !*tmp) tmp = ".";
+    snprintf(root, sizeof(root), "%s\\darwinnt-selftest", tmp);
+
+    int fails = 0;
+    if (dnt_vfs_init(root) != 0) {
+        printf("fs selftest: init failed\n");
+        return 1;
+    }
+    int fd = dnt_vfs_open("/tmp/probe.txt", DNT_O_CREAT | DNT_O_TRUNC | DNT_O_WRONLY, 0644);
+    if (fd < 0) { printf("fs selftest: create failed (%d)\n", fd); return 1; }
+    int err = 0;
+    if (dnt_vfs_write(fd, "hello", 5, &err) != 5) { printf("fs selftest: write failed\n"); fails++; }
+    dnt_vfs_close(fd);
+
+    fd = dnt_vfs_open("/tmp/probe.txt", DNT_O_RDONLY, 0);
+    char buf[16] = {0};
+    int64_t n = dnt_vfs_read(fd, buf, sizeof(buf) - 1, &err);
+    if (n != 5 || strcmp(buf, "hello") != 0) { printf("fs selftest: read back '%s'\n", buf); fails++; }
+    dnt_vfs_close(fd);
+
+    dnt_stat st;
+    if (dnt_vfs_stat("/tmp/probe.txt", &st, 1) != 0 ||
+        (st.st_mode & DNT_S_IFMT) != DNT_S_IFREG || st.st_size != 5) {
+        printf("fs selftest: stat wrong\n");
+        fails++;
+    }
+    if (dnt_vfs_unlink("/tmp/probe.txt") != 0) { printf("fs selftest: unlink failed\n"); fails++; }
+
+    printf("fs selftest: %s\n", fails ? "FAILED" : "ok");
+    return fails;
+}
+
 static int self_test(void)
 {
     /* Minimal assertions so the shipped binary can prove it is sane without
@@ -127,6 +169,8 @@ int main(int argc, char **argv)
         return cmd_translate(argv[2]);
     if (strcmp(argv[1], "--test") == 0)
         return self_test();
+    if (strcmp(argv[1], "--selftest-fs") == 0)
+        return self_test_fs();
     fprintf(stderr, "unknown command: %s\n", argv[1]);
     return 1;
 }

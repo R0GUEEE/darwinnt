@@ -27,11 +27,14 @@ jobs:
           if (!(Test-Path $gcc)) { $gcc = (Get-Command x86_64-w64-mingw32-gcc).Source }
           New-Item -ItemType Directory -Force build | Out-Null
           & $gcc -std=c11 -Wall -Wextra -Wpedantic -O2 -static -Iinclude -Isrc `
-            src/main.c src/dnt_macho.c src/dnt_path.c src/dnt_syscall.c src/dnt_win.c `
+            src/main.c src/dnt_macho.c src/dnt_path.c src/dnt_syscall.c `
+            src/dnt_vfs.c src/dnt_port_win.c src/dnt_win.c `
             -o build/darwinnt.exe
           if ($LASTEXITCODE -ne 0) { throw "build failed" }
           & build\darwinnt.exe --test
           & build\darwinnt.exe --translate /var/tmp/example
+          & build\darwinnt.exe --selftest-fs
+          if ($LASTEXITCODE -ne 0) { throw "filesystem self-test failed" }
           Get-Item build\darwinnt.exe | Select-Object Name,Length
 
       - uses: actions/upload-artifact@v4
@@ -54,10 +57,17 @@ jobs:
           I="-Iinclude -Isrc"
           $CC $I tests/test_macho.c tests/fixture.c src/dnt_macho.c -o build_test_macho
           $CC $I tests/test_path.c src/dnt_path.c -o build_test_path
-          $CC $I tests/test_syscall.c src/dnt_syscall.c -o build_test_syscall
+          $CC $I tests/test_syscall.c src/dnt_syscall.c src/dnt_vfs.c \
+              src/dnt_path.c src/dnt_port_posix.c -o build_test_syscall
+          $CC $I tests/test_vfs.c src/dnt_vfs.c src/dnt_path.c src/dnt_port_posix.c \
+              -o build_test_vfs
+          $CC $I tests/test_syscalls_fs.c src/dnt_syscall.c src/dnt_vfs.c \
+              src/dnt_path.c src/dnt_port_posix.c -o build_test_syscalls_fs
           ./build_test_macho
           ./build_test_path
           ./build_test_syscall
+          ./build_test_vfs
+          ./build_test_syscalls_fs
       - name: Fuzz the Mach-O parser
         run: |
           cat > fuzz_main.c <<'EOF'

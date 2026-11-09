@@ -13,6 +13,64 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
+#include <string.h>
+#include "dnt_syscall.h"
+
+/* Guest address space.
+ *
+ * The guest's addresses are not host addresses: the image window is reserved
+ * with VirtualAlloc at a chosen base, and every guest pointer is validated
+ * against that reservation before being dereferenced. A guest asking to read
+ * 4 GB from an arbitrary address must get EFAULT, not a host AV.
+ */
+typedef struct {
+    uint64_t base;
+    uint64_t size;
+} dnt_region;
+
+#define DNT_MAX_REGIONS 64
+static dnt_region g_regions[DNT_MAX_REGIONS];
+static int g_nregions;
+
+void dnt_win_register_region(uint64_t base, uint64_t size)
+{
+    if (g_nregions < DNT_MAX_REGIONS) {
+        g_regions[g_nregions].base = base;
+        g_regions[g_nregions].size = size;
+        g_nregions++;
+    }
+}
+
+static int guest_readable(uint64_t addr, uint64_t n)
+{
+    if (n == 0)
+        return 1;
+    if (addr + n < addr)   /* overflow */
+        return 0;
+    for (int i = 0; i < g_nregions; i++) {
+        if (addr >= g_regions[i].base &&
+            addr + n <= g_regions[i].base + g_regions[i].size)
+            return 1;
+    }
+    return 0;
+}
+
+size_t dnt_u_read(uint64_t guest_addr, void *dst, size_t n);
+size_t dnt_u_read(uint64_t guest_addr, void *dst, size_t n)
+{
+    if (!guest_readable(guest_addr, n))
+        return 0;
+    memcpy(dst, (const void *)(uintptr_t)guest_addr, n);
+    return n;
+}
+
+void dnt_u_write(uint64_t guest_addr, const void *src, size_t n);
+void dnt_u_write(uint64_t guest_addr, const void *src, size_t n)
+{
+    if (!guest_readable(guest_addr, n))
+        return;
+    memcpy((void *)(uintptr_t)guest_addr, src, n);
+}
 
 static DWORD g_exit_code = 0;
 static volatile LONG g_exiting = 0;
