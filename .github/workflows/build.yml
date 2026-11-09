@@ -42,7 +42,12 @@ jobs:
         run: |
           # The fixtures are checked in, built on Linux by the tests job, or by
           # tools/build-fixtures.sh locally. Verify a guest program really runs.
+          # --info first: proves the exe can read the file and parse it, which
+          # separates "crashes at startup" from "crashes in the interpreter".
+          & build\darwinnt.exe --info tests\fixtures\hello.macho
+          Write-Host "info exit=$LASTEXITCODE"
           & build\darwinnt.exe --run tests\fixtures\hello.macho
+          Write-Host "run exit=$LASTEXITCODE"
           if ($LASTEXITCODE -ne 0) { throw "hello.macho failed" }
           & build\darwinnt.exe --run tests\fixtures\exitcode.macho
           if ($LASTEXITCODE -ne 42) { throw "exitcode.macho returned $LASTEXITCODE, expected 42" }
