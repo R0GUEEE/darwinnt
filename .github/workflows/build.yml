@@ -50,7 +50,9 @@ jobs:
           Write-Host "run exit=$LASTEXITCODE"
           if ($LASTEXITCODE -ne 0) { throw "hello.macho failed" }
           & build\darwinnt.exe --run tests\fixtures\exitcode.macho
-          if ($LASTEXITCODE -ne 42) { throw "exitcode.macho returned $LASTEXITCODE, expected 42" }
+          $code = $LASTEXITCODE
+          Write-Host "exitcode.macho returned $code"
+          if ($code -ne 42) { throw "exitcode.macho returned $code, expected 42" }
           Get-Item build\darwinnt.exe | Select-Object Name,Length
 
       - uses: actions/upload-artifact@v4
