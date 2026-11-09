@@ -12,6 +12,7 @@
  */
 #include "dnt_cpu.h"
 #include "dnt_syscall.h"
+#include "dnt_bind.h"
 #include "dnt_abi.h"
 #include "dnt_errno.h"
 #include "generated/syscalls.h"
@@ -122,6 +123,39 @@ int dnt_cpu_run(dnt_cpu *c, uint64_t max_instructions)
 {
     for (uint64_t steps = 0; steps < max_instructions; steps++) {
         uint64_t pc = c->pc;
+
+        /* A jump to a trampoline address is a call to a bound libSystem
+         * function. It is dispatched here rather than executed, because the
+         * bytes at that address live in our own allocation, not the image. */
+        if (c->bind) {
+            int idx = dnt_bind_trampoline_index((dnt_bind *)c->bind, pc);
+            if (idx >= 0) {
+                uint32_t nr = dnt_bind_syscall((dnt_bind *)c->bind, idx);
+                int failed = 0;
+                uint64_t r = dnt_syscall_ex(nr, c->x[0], c->x[1], c->x[2],
+                                            c->x[3], c->x[4], c->x[5], &failed);
+                c->x[0] = r;
+                if (failed) c->nzcv |= F_C; else c->nzcv &= ~F_C;
+                if (nr == DSYS_EXIT) {
+                    c->halt = DNT_HALT_EXIT;
+                    c->exit_code = (int)(c->x[0] & 0xFF);
+                    return 0;
+                }
+                /* return to caller: the stub used bl, so x30 holds it */
+                c->pc = c->x[30];
+                continue;
+            }
+        }
+
+        /* The binder is only reached when a slot still points at it, i.e. an
+         * import we could not resolve. Say which one instead of faulting. */
+        if (c->bind && pc == ((dnt_bind *)c->bind)->binder_addr) {
+            c->halt = DNT_HALT_SYSCALL;
+            snprintf(c->halt_detail, sizeof(c->halt_detail),
+                     "unresolved import reached dyld_stub_binder");
+            return -1;
+        }
+
         if (pc < c->image_base || pc + 4 > c->image_base + c->image_size) {
             c->halt = DNT_HALT_FAULT;
             snprintf(c->halt_detail, sizeof(c->halt_detail),
@@ -303,6 +337,27 @@ int dnt_cpu_run(dnt_cpu *c, uint64_t max_instructions)
             continue;
         }
 
+        /* ---- LDR (literal): loads a pointer from the image --------------
+         * This is how a lazy stub reaches its symbol pointer:
+         *     ldr x16, label@PAGE-ish ; b <stub>
+         * Without it every dynamically linked call stalls at the stub. */
+        if ((insn & 0x3B000000) == 0x18000000) {
+            int rt = insn & 31;
+            int64_t imm19 = (int64_t)((insn >> 5) & 0x7FFFF);
+            if (imm19 & (1 << 18))
+                imm19 -= (1 << 19);
+            uint64_t ea = pc + (uint64_t)(imm19 << 2);
+            if (ea + 8 > c->image_base + c->image_size) {
+                c->halt = DNT_HALT_FAULT;
+                snprintf(c->halt_detail, sizeof(c->halt_detail),
+                         "ldr literal target 0x%llx outside image",
+                         (unsigned long long)ea);
+                return -1;
+            }
+            setreg(c, rt, rd64((const uint8_t *)ea));
+            continue;
+        }
+
         /* ---- LDP/STP (signed offset, 64-bit) ---- */
         if ((insn & 0x7A000000) == 0x28000000) {
             int opc = (insn >> 30) & 3;
@@ -365,6 +420,8 @@ int dnt_cpu_run(dnt_cpu *c, uint64_t max_instructions)
              (unsigned long long)max_instructions);
     return -1;
 }
+
+void dnt_cpu_set_binding(dnt_cpu *c, void *b) { c->bind = b; }
 
 void dnt_cpu_reset(dnt_cpu *c, uint64_t entry, uint64_t sp,
                    uint64_t image_base, uint64_t image_size)

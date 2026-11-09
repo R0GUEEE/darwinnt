@@ -27,6 +27,7 @@ filesystem semantics — not by emulating a phone.
 | Syscall dispatch | 421-call table from XNU; **31 implemented** |
 | ARM64 interpreter | entry-code subset; `svc #0x80` trapped, Darwin x0+carry convention |
 | Executes real binaries | `hello`, `exit(42)`, and `ENOSYS` fixtures pass on Windows CI |
+| Symbol binding | libSystem symbol table + trampolines; **lazy stubs not resolved yet** |
 | ASan/UBSan clean fuzzing | 20k mutated images per CI run, plus local campaigns |
 
 The loader is the part with real mileage: it was fuzzed to 18,000+ mutated
@@ -101,6 +102,35 @@ Three bugs the real binaries found that hand-made fixtures never would:
   copies landed at wild offsets
 - `exit()` was dispatched through the host hook, which on Win32 calls
   `ExitProcess`: the guest's code was lost and the image never freed
+
+## Dynamic linking: current limit
+
+A *statically linked* image runs. A *dynamically linked* one does not yet, and
+it fails honestly:
+
+```
+$ darwinnt --run dynwrite.macho
+darwinnt: unresolved import reached dyld_stub_binder
+  (lazy binding: the binary calls libSystem through stubs this loader cannot yet resolve)
+```
+
+What works: the bind/weak-bind opcode streams are decoded, a libSystem symbol
+table (`write`, `read`, `open`, `stat`, `exit`, …) maps names to syscalls, each
+resolved name gets its own trampoline address the interpreter recognises, and a
+jump to an unresolved slot is reported by name instead of faulting.
+
+What is missing: the lazy-binding handshake. lld emits each lazy call as
+
+```
+adrp x16, __la_symbol_ptr@PAGE ; ldr x16,[x16,#off] ; br x16
+```
+
+where the pointer initially leads to `dyld_stub_binder` with the symbol name
+passed in x17. Resolving that needs either a real `libSystem.B.dylib` to bind
+against (lld will not emit lazy bind entries against a synthesized stub) or an
+implementation of the binder's stack/register protocol. Neither is faked here:
+the test suite asserts the failure is clean and named, so the day it is fixed
+the test flips deliberately rather than by accident.
 
 ## Filesystem
 

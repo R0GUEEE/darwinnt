@@ -158,6 +158,12 @@ static int cmd_run(const char *path, int verbose)
     free(data);
     if (rc != 0) {
         fprintf(stderr, "darwinnt: %s\n", r.detail);
+        /* Say what is missing rather than leaving the user to guess. */
+        for (int i = 0; i < r.nmissing; i++)
+            fprintf(stderr, "  unresolved import: %s\n", r.missing[i]);
+        if (r.nmissing == 0 && r.halt == 5)
+            fprintf(stderr, "  (lazy binding: the binary calls libSystem through "
+                            "stubs this loader cannot yet resolve)\n");
         return rc == -1 ? 1 : 3;
     }
     return r.exit_code;

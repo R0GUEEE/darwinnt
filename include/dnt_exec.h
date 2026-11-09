@@ -16,6 +16,10 @@ typedef struct {
     uint64_t image_size;
     int      mapped_at_requested;  /* 0 when the image slid to another base */
     char     detail[160];
+    int      nbound;            /* import slots resolved */
+    int      nmissing;
+    int      bind_ok;           /* 0 when a fixup mechanism was unsupported */
+    char     missing[32][64];   /* symbols we do not provide */
 } dnt_exec_result;
 
 /* Map `file` and run it from its LC_MAIN entry with `root` as the Darwin

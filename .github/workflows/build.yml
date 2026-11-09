@@ -29,7 +29,7 @@ jobs:
           & $gcc -std=c11 -Wall -Wextra -Wpedantic -O2 -static -Iinclude -Isrc `
             src/main.c src/dnt_macho.c src/dnt_path.c src/dnt_syscall.c `
             src/dnt_vfs.c src/dnt_port_win.c src/dnt_win.c `
-            src/dnt_cpu.c src/dnt_exec.c `
+            src/dnt_cpu.c src/dnt_exec.c src/dnt_bind.c `
             -o build/darwinnt.exe
           if ($LASTEXITCODE -ne 0) { throw "build failed" }
           & build\darwinnt.exe --test
@@ -102,7 +102,7 @@ jobs:
           ./build_test_syscall
           $CC $I tests/test_exec.c src/dnt_exec.c src/dnt_cpu.c src/dnt_syscall.c \
               src/dnt_macho.c src/dnt_vfs.c src/dnt_path.c src/dnt_port_posix.c \
-              -o build_test_exec
+              src/dnt_bind.c -o build_test_exec
           ./build_test_vfs
           ./build_test_syscalls_fs
           ./build_test_exec

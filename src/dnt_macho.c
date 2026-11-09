@@ -658,6 +658,10 @@ int dnt_macho_apply_fixups(dnt_image *img, uint8_t *image_at_base,
         const uint8_t *start = img->dyld_info + img->info.bind_off;
         run_bind_stream(&ctx, start, start + img->info.bind_size, cb, user);
     }
+    if (img->info.weak_bind_size) {
+        const uint8_t *start = img->dyld_info + img->info.weak_bind_off;
+        run_bind_stream(&ctx, start, start + img->info.weak_bind_size, cb, user);
+    }
     if (img->info.lazy_bind_size) {
         const uint8_t *start = img->dyld_info + img->info.lazy_bind_off;
         run_bind_stream(&ctx, start, start + img->info.lazy_bind_size, cb, user);

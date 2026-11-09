@@ -128,6 +128,25 @@ int main(void)
     CHECK(run_and_capture("tests/fixtures/badsys.macho", "", 78, NULL) == 0,
           "badsys.macho observes ENOSYS(78) from fork");
 
+    /* A dynamically linked binary reaches a lazy stub we cannot resolve yet.
+     * The contract: it must FAIL CLEANLY with a diagnosis, not fault or hang.
+     * When lazy binding lands, this expectation flips to "prints hi". */
+    {
+        size_t dl = 0;
+        uint8_t *dyn = load("tests/fixtures/dynwrite.macho", &dl);
+        if (dyn) {
+            dnt_exec_result r;
+            dnt_syscall_init(host());
+            int rc = dnt_exec_image(dyn, dl, "/tmp/dnt_exec_root", 0, &r);
+            CHECK(rc != 0, "dynwrite.macho refused cleanly (halt=%d)", r.halt);
+            CHECK(r.halt == DNT_HALT_SYSCALL,
+                  "dynwrite.macho halted at the binder (halt=%d)", r.halt);
+            CHECK(strstr(r.detail, "dyld_stub_binder") != NULL,
+                  "dynwrite.macho names the unresolved binder");
+            free(dyn);
+        }
+    }
+
     /* A truncated image must be refused, not executed. */
     size_t len = 0;
     uint8_t *data = load("tests/fixtures/hello.macho", &len);

@@ -13,6 +13,7 @@ typedef struct {
     char     halt_detail[160];
     uint64_t image_base;
     uint64_t image_size;
+    void *bind;              /* dnt_bind*, NULL for static images */
 } dnt_cpu;
 
 enum {
@@ -28,5 +29,6 @@ void dnt_cpu_reset(dnt_cpu *c, uint64_t entry, uint64_t sp,
                    uint64_t image_base, uint64_t image_size);
 int  dnt_cpu_run(dnt_cpu *c, uint64_t max_instructions);
 uint64_t dnt_cpu_sp(dnt_cpu *c);
+void dnt_cpu_set_binding(dnt_cpu *c, void *b);
 
 #endif

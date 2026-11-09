@@ -11,6 +11,8 @@
 #include "dnt_abi.h"
 #include "dnt_errno.h"
 #include "dnt_syscall.h"
+#include "dnt_bind.h"
+#include "dnt_cpu.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -147,9 +149,46 @@ int dnt_exec_image(const uint8_t *file, size_t file_len, const char *root,
         return DNT_E_NOMEM;
     }
 
+    /* ---- binding ----
+     * The trampoline page and the binder address must sit outside the image,
+     * so the interpreter can recognise a jump to them. They are placed in a
+     * separate host allocation; the CPU checks them before fetching. */
+    static dnt_bind bind;
+    dnt_bind_reset(&bind);
+    uint64_t tramp_base = 0;
+    const uint64_t tramp_size = DNT_MAX_TRAMPS * DNT_TRAMPOLINE_STRIDE;
+    uint8_t *tramp = map_region(tramp_size, &tramp_base, why, sizeof(why));
+    if (!tramp) {
+        unmap_region(stack, stack_size);
+        unmap_region(mem, image_size);
+        out->error = DNT_E_NOMEM;
+        snprintf(out->detail, sizeof(out->detail), "cannot map trampolines: %s", why);
+        return DNT_E_NOMEM;
+    }
+    bind.trampoline_base = tramp_base;
+    if (getenv("DNT_TRACE"))
+        fprintf(stderr, "tramp base=0x%llx size=%llu binder=0x%llx image=0x%llx..0x%llx\n",
+                (unsigned long long)tramp_base, (unsigned long long)tramp_size,
+                (unsigned long long)(tramp_base + tramp_size + 0x100),
+                (unsigned long long)image_base,
+                (unsigned long long)(image_base + image_size));
+    /* The binder lives one page past the trampolines: a distinct address the
+     * CPU can recognise without colliding with a trampoline index. */
+    bind.binder_addr = tramp_base + tramp_size + 0x100;
+    bind.image_size = image_size;
+
+    dnt_bind_report rep;
+    dnt_bind_apply(&img, mem, &bind, &rep);
+    out->nbound = rep.nbound;
+    out->nmissing = rep.nmissing;
+    out->bind_ok = (rep.unsupported == 0);
+    for (int i = 0; i < rep.nmissing && i < DNT_MAX_MISSING; i++)
+        snprintf(out->missing[i], sizeof(out->missing[0]), "%s", rep.missing[i]);
+
     dnt_cpu cpu;
     dnt_cpu_reset(&cpu, image_base + img.entry_off,
                   stack_base + stack_size - 16, image_base, image_size);
+    dnt_cpu_set_binding(&cpu, &bind);
     cpu.x[0] = 0;            /* argc */
     cpu.x[1] = 0;            /* argv */
     cpu.x[30] = 0;           /* return address: RET to 0 stops the machine */
@@ -170,6 +209,7 @@ int dnt_exec_image(const uint8_t *file, size_t file_len, const char *root,
     if (verbose && run != 0)
         fprintf(stderr, "darwinnt: halted: %s\n", cpu.halt_detail);
 
+    unmap_region(tramp, tramp_size);
     unmap_region(stack, stack_size);
     unmap_region(mem, image_size);
 
