@@ -131,6 +131,15 @@ static int self_test_fs(void)
         fails++;
     }
     if (dnt_vfs_unlink("/tmp/probe.txt") != 0) { printf("fs selftest: unlink failed\n"); fails++; }
+    /* Leave nothing behind: a self-test that litters the tree gets committed
+     * by the next `git add -A` and breaks checkout on another platform. */
+    dnt_vfs_rmdir("/tmp");
+    dnt_vfs_rmdir("/private/tmp");
+    dnt_vfs_rmdir("/private/var/tmp");
+    dnt_vfs_rmdir("/private/var");
+    dnt_vfs_rmdir("/private");
+    dnt_vfs_rmdir("/var");
+    dnt_vfs_rmdir("/");
 
     printf("fs selftest: %s\n", fails ? "FAILED" : "ok");
     return fails;
