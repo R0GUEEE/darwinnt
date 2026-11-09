@@ -22,7 +22,9 @@ filesystem semantics — not by emulating a phone.
 | Chained fixups (`LC_DYLD_CHAINED_FIXUPS`) | Decodes PTR_64 / arm64e, multi-start pages |
 | Classic bind opcodes (`LC_DYLD_INFO`) | Bind + lazy bind streams |
 | Path translation | `/` → config root, `/var`→`/private/var`, traversal rejected |
-| Syscall dispatch | 421-call table generated from XNU; 9 implemented: `exit`, `getpid`, `getppid`, `getuid`, `geteuid`, `getgid`, `getegid`, `gettimeofday` |
+| Filesystem (VFS) | fd table, cwd-relative resolution, `struct stat`, packed dirents |
+| Host port backends | POSIX + Win32 behind one interface; Win32 exercised in CI |
+| Syscall dispatch | 421-call table from XNU; **29 implemented** |
 | ASan/UBSan clean fuzzing | 20k mutated images per CI run, plus local campaigns |
 
 The loader is the part with real mileage: it was fuzzed to 18,000+ mutated
@@ -70,6 +72,30 @@ impossible map.
 `st_ino` at 8 and `st_size` at 96, because Darwin's `mode_t` is 16-bit; the
 chained-fixups segment record has `page_count` at 20, not 18. Each of these was
 wrong on the first attempt and is now pinned by `_Static_assert` and tests.
+
+## Filesystem
+
+Implemented and tested end to end (`tests/test_syscalls_fs.c` drives the real
+dispatcher with a simulated guest address space):
+
+| Area | Syscalls |
+|---|---|
+| Open/close | `open`, `open_extended`, `close` |
+| I/O | `read`, `write`, `lseek`, `ftruncate`, `fsync` |
+| Metadata | `stat`, `lstat`, `fstat`, `stat64`, `lstat64`, `fstat64`, `access` |
+| Directories | `getdirentries64`, `mkdir`, `rmdir`, `chdir` |
+| Mutation | `unlink`, `rename` |
+| Process | `exit`, `getpid`, `getppid`, `getuid`, `geteuid`, `getgid`, `getegid`, `gettimeofday` |
+
+Darwin behaviour the tests pin down, because each one is a place a naive
+mapping silently diverges:
+
+- `/var/x` and `/private/var/x` reach the same file (prefix rewrite, no links)
+- `open("/etc/motd/")` → `ENOTDIR`; reading a directory → `EISDIR`
+- `..` above the root → `EACCES`, not a host path
+- `getdirentries64` records are 8-byte aligned with correct `d_type`
+- `struct stat` is 144 bytes with `st_ino` at 8 (Darwin `mode_t` is 16-bit)
+- a guest pointer outside the registered region → `EFAULT`, never a host fault
 
 ## Syscall coverage
 
