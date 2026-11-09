@@ -24,7 +24,9 @@ filesystem semantics — not by emulating a phone.
 | Path translation | `/` → config root, `/var`→`/private/var`, traversal rejected |
 | Filesystem (VFS) | fd table, cwd-relative resolution, `struct stat`, packed dirents |
 | Host port backends | POSIX + Win32 behind one interface; Win32 exercised in CI |
-| Syscall dispatch | 421-call table from XNU; **29 implemented** |
+| Syscall dispatch | 421-call table from XNU; **31 implemented** |
+| ARM64 interpreter | entry-code subset; `svc #0x80` trapped, Darwin x0+carry convention |
+| Executes real binaries | `hello`, `exit(42)`, and `ENOSYS` fixtures pass on Windows CI |
 | ASan/UBSan clean fuzzing | 20k mutated images per CI run, plus local campaigns |
 
 The loader is the part with real mileage: it was fuzzed to 18,000+ mutated
@@ -72,6 +74,33 @@ impossible map.
 `st_ino` at 8 and `st_size` at 96, because Darwin's `mode_t` is 16-bit; the
 chained-fixups segment record has `page_count` at 20, not 18. Each of these was
 wrong on the first attempt and is now pinned by `_Static_assert` and tests.
+
+## Running a Darwin binary
+
+Real Darwin executables run, built by clang + ld64.lld (`tools/build-fixtures.sh`):
+
+```
+$ darwinnt --run tests/fixtures/hello.macho
+hello
+$ darwinnt --run tests/fixtures/exitcode.macho; echo $?
+42
+$ darwinnt --run tests/fixtures/badsys.macho; echo $?   # fork() is unimplemented
+78
+```
+
+The interpreter covers the instruction subset linked entry code uses: moves,
+ADRP/ADD address formation, conditional branches, loads/stores. Reaching an
+instruction outside that set halts with the address and encoding rather than
+guessing — an interpreter that improvises is worse than one that stops.
+
+Three bugs the real binaries found that hand-made fixtures never would:
+
+- `__PAGEZERO` (vmaddr 0, vmsize 4 GB) was rejected as "segment below base" —
+  every real Darwin executable has one
+- the executor used the file's link address as the mapping address, so segment
+  copies landed at wild offsets
+- `exit()` was dispatched through the host hook, which on Win32 calls
+  `ExitProcess`: the guest's code was lost and the image never freed
 
 ## Filesystem
 
