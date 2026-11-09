@@ -112,6 +112,17 @@ static int self_test_fs(void)
         printf("fs selftest: init failed\n");
         return 1;
     }
+    {
+        /* Diagnose rather than just fail: show the mapped path and whether
+         * its directory exists. A bare errno from a CI-run binary is not
+         * actionable when the host path is the actual problem. */
+        char mapped[DNT_MAXPATHLEN + 160];
+        dnt_path_translate(dnt_vfs_root(), "/tmp/probe.txt", 0, mapped, sizeof(mapped));
+        dnt_stat ds;
+        int d_rc = dnt_vfs_stat("/private/tmp", &ds, 1);
+        printf("fs selftest: root=%s\n  probe=%s\n  /private/tmp stat rc=%d\n",
+               dnt_vfs_root(), mapped, d_rc);
+    }
     int fd = dnt_vfs_open("/tmp/probe.txt", DNT_O_CREAT | DNT_O_TRUNC | DNT_O_WRONLY, 0644);
     if (fd < 0) { printf("fs selftest: create failed (%d)\n", fd); return 1; }
     int err = 0;
