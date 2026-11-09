@@ -83,12 +83,17 @@ static void layout(HWND hwnd)
     int pad = 10 * g_ui_scale / 100;
     int bar = 34 * g_ui_scale / 100;
     int status = 24 * g_ui_scale / 100;
-    int bw = 120 * g_ui_scale / 100;
+    /* Button widths are set from the text they must hold: "Run binary..." is
+     * wider than "Stop", and splitting a fixed budget between them clipped the
+     * label. */
+    int run_w = 110 * g_ui_scale / 100;
+    int stop_w = 60 * g_ui_scale / 100;
+    int root_w = 320 * g_ui_scale / 100;
     int x = pad, y = pad, h = 26 * g_ui_scale / 100;
 
-    MoveWindow(g_root, x + bw + pad, y, 320 * g_ui_scale / 100, h, TRUE);
-    MoveWindow(g_run, x + bw + pad + 330 * g_ui_scale / 100, y, bw / 2, h, TRUE);
-    MoveWindow(g_stop, x + bw + pad + 330 * g_ui_scale / 100 + bw / 2 + 6, y, bw / 2, h, TRUE);
+    MoveWindow(g_root, x, y, root_w, h, TRUE);
+    MoveWindow(g_run, x + root_w + pad, y, run_w, h, TRUE);
+    MoveWindow(g_stop, x + root_w + pad + run_w + 6, y, stop_w, h, TRUE);
     MoveWindow(g_output, pad, pad + bar,
                rc.right - pad * 2,
                rc.bottom - (pad + bar) - status - pad, TRUE);

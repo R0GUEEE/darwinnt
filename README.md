@@ -76,6 +76,23 @@ impossible map.
 chained-fixups segment record has `page_count` at 20, not 18. Each of these was
 wrong on the first attempt and is now pinned by `_Static_assert` and tests.
 
+## The Windows app
+
+`darwinnt-gui.exe` is a native Win32 application (PE32+ GUI subsystem, no
+console window): a binary picker, a Darwin root field, Run/Stop, a scrolling
+monospace output pane, and a status bar reporting the exit code and how many
+imports were bound.
+
+![darwinnt GUI](docs/screenshot.png)
+
+Guest `write()` to fd 1/2 reaches the output pane through a port-layer output
+sink rather than a console handle, so the same engine drives both front ends.
+The guest runs on a worker thread; its output is posted to the UI thread and
+appended there, never touching a control cross-thread.
+
+Stop is honest: the interpreter has no interruption point yet, so it terminates
+the worker thread and says that guest resources were not released.
+
 ## Running a Darwin binary
 
 Real Darwin executables run, built by clang + ld64.lld (`tools/build-fixtures.sh`):
