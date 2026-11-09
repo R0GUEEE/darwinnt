@@ -73,7 +73,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: darwinnt-windows-x64
-          path: build/darwinnt.exe
+          path: |
+            build/darwinnt.exe
+            build/darwinnt-gui.exe
           if-no-files-found: error
 
   tests:
