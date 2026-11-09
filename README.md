@@ -120,6 +120,38 @@ Three bugs the real binaries found that hand-made fixtures never would:
 - `exit()` was dispatched through the host hook, which on Win32 calls
   `ExitProcess`: the guest's code was lost and the image never freed
 
+## Can it run an IPA?
+
+No, and the app will tell you why in detail. `Inspect IPA...` (or
+`darwinnt --ipa app.ipa`) reports what the bundle actually is:
+
+```
+bundle      vickiegpt.VS-Code
+name        CodifyOne
+version     1.12.0 (min iOS 26.0)
+executable  CodifyOne  79.3 MB
+arm64       yes
+encrypted   no
+frameworks  66 linked, 592 bundled
+verdict: needs 66 private frameworks (UIKit, Foundation, ...).
+         darwinnt provides 27 libSystem symbols and no frameworks,
+         so this is an app, not a runnable program.
+```
+
+An IPA is not a program, it is an application bundle. Four independent things
+stand between it and execution:
+
+| Requirement | Why it blocks |
+|---|---|
+| SpringBoard + UIKit/SwiftUI | Closed-source GUI frameworks that own the window server and GPU. There is nothing to link against. |
+| Private frameworks | A typical app links 60-100 (AVFoundation, CoreML, Metal, FileProvider…). Each would need reimplementation. |
+| FairPlay | App Store binaries are encrypted; `cryptid != 0` means `__TEXT` is ciphertext keyed to the device. |
+| iOS Darwin, not macOS | Different ABI details, syscall set, and trap handling. |
+
+No amount of loader work closes these. What the inspector gives you is an
+honest answer per file, and the pieces that *are* portable — extracted
+Mach-O binaries, frameworks, resources — which is where the useful work is.
+
 ## Dynamic linking: current limit
 
 A *statically linked* image runs. A *dynamically linked* one does not yet, and

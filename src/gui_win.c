@@ -34,17 +34,20 @@
 #include "dnt_vfs.h"
 #include "dnt_win.h"
 #include "dnt_syscall.h"
+#include "dnt_ipa.h"
 
 #define IDC_OUTPUT   1001
 #define IDC_OPEN     1002
 #define IDC_RUN      1003
 #define IDC_STOP     1004
 #define IDC_ROOT     1005
+#define IDC_IPA      1006
+#define IDM_IPA      2003
 #define IDM_ABOUT    2001
 #define IDM_EXIT     2002
 #define WM_APPEND    (WM_APP + 1)   /* lParam = heap char*, wParam = len */
 
-static HWND g_main, g_output, g_root, g_run, g_stop, g_status;
+static HWND g_main, g_output, g_root, g_run, g_stop, g_status, g_ipa;
 static HFONT g_mono;
 static HANDLE g_thread;
 static volatile LONG g_running;
@@ -94,6 +97,8 @@ static void layout(HWND hwnd)
     MoveWindow(g_root, x, y, root_w, h, TRUE);
     MoveWindow(g_run, x + root_w + pad, y, run_w, h, TRUE);
     MoveWindow(g_stop, x + root_w + pad + run_w + 6, y, stop_w, h, TRUE);
+    MoveWindow(g_ipa, x + root_w + pad + run_w + stop_w + 12, y,
+               110 * g_ui_scale / 100, h, TRUE);
     MoveWindow(g_output, pad, pad + bar,
                rc.right - pad * 2,
                rc.bottom - (pad + bar) - status - pad, TRUE);
@@ -212,6 +217,117 @@ static void start_run(HWND hwnd)
     g_thread = CreateThread(NULL, 0, guest_thread, job, 0, NULL);
 }
 
+
+/* Read a file whole. Returns NULL on failure. */
+static uint8_t *read_whole_file(const char *path, size_t *out_len, char *err, size_t errcap)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) { snprintf(err, errcap, "cannot open file"); return NULL; }
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n <= 0) { fclose(f); snprintf(err, errcap, "empty file"); return NULL; }
+    uint8_t *d = malloc((size_t)n);
+    if (!d) { fclose(f); snprintf(err, errcap, "out of memory (%ld bytes)", n); return NULL; }
+    if (fread(d, 1, (size_t)n, f) != (size_t)n) {
+        free(d); fclose(f);
+        snprintf(err, errcap, "short read");
+        return NULL;
+    }
+    fclose(f);
+    *out_len = (size_t)n;
+    return d;
+}
+
+/* Open an IPA and report what it actually is. This is deliberately blunt: an
+ * app that links 66 private frameworks is not something this engine can run,
+ * and the report says so rather than implying a workaround exists. */
+static void inspect_ipa(HWND hwnd)
+{
+    wchar_t wfile[MAX_PATH] = {0};
+    OPENFILENAMEW ofn;
+    memset(&ofn, 0, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFilter = L"iOS apps (*.ipa)\0*.ipa\0All files\0*.*\0";
+    ofn.lpstrFile = wfile;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    if (!GetOpenFileNameW(&ofn))
+        return;
+
+    char path[MAX_PATH * 4];
+    WideCharToMultiByte(CP_UTF8, 0, wfile, -1, path, sizeof(path), NULL, NULL);
+
+    SendMessageW(g_output, WM_SETTEXT, 0, (LPARAM)L"");
+    char line[512];
+    int len = snprintf(line, sizeof(line), "[ipa] opening %s\r\n", path);
+    ui_append(line, (uint64_t)len);
+    set_status(L"inspecting...");
+    UpdateWindow(g_main);
+
+    size_t n = 0;
+    char err[256] = {0};
+    uint8_t *data = read_whole_file(path, &n, err, sizeof(err));
+    if (!data) {
+        len = snprintf(line, sizeof(line), "[ipa] failed: %s\r\n", err);
+        ui_append(line, (uint64_t)len);
+        set_status(L"inspection failed");
+        return;
+    }
+
+    dnt_ipa ipa;
+    if (dnt_ipa_open(&ipa, data, n) != 0) {
+        len = snprintf(line, sizeof(line), "[ipa] %s\r\n", ipa.error);
+        ui_append(line, (uint64_t)len);
+        free(data);
+        set_status(L"not an iOS app bundle");
+        return;
+    }
+
+    len = snprintf(line, sizeof(line),
+                   "\r\n  bundle        %s\r\n"
+                   "  name          %s\r\n"
+                   "  version       %s   (minimum iOS %s)\r\n"
+                   "  executable    %s  %.1f MB\r\n"
+                   "  architecture  arm64\r\n"
+                   "  encryption    %s\r\n"
+                   "  entries       %u files, %.1f MB archive\r\n"
+                   "  frameworks    %d linked, %d bundled\r\n",
+                   ipa.bundle_id, ipa.display_name, ipa.version, ipa.min_os,
+                   ipa.executable, ipa.exec_size / 1e6,
+                   (ipa.has_encryption_info && ipa.crypt_id)
+                       ? "FairPlay-encrypted (App Store)" : "none",
+                   ipa.n_entries, n / 1e6,
+                   ipa.n_dylibs, ipa.n_frameworks);
+    ui_append(line, (uint64_t)len);
+
+    if (ipa.n_dylibs > 0) {
+        ui_puts("\r\n  required frameworks (first 12):\r\n");
+        for (int i = 0; i < ipa.n_dylibs && i < 12; i++) {
+            len = snprintf(line, sizeof(line), "    %s\r\n", ipa.dylibs[i]);
+            ui_append(line, (uint64_t)len);
+        }
+        if (ipa.n_dylibs > 12) {
+            len = snprintf(line, sizeof(line), "    ... and %d more\r\n",
+                           ipa.n_dylibs - 12);
+            ui_append(line, (uint64_t)len);
+        }
+    }
+
+    char verdict[512];
+    dnt_ipa_verdict(&ipa, verdict, sizeof(verdict));
+    len = snprintf(line, sizeof(line), "\r\n  VERDICT: %s\r\n\r\n", verdict);
+    ui_append(line, (uint64_t)len);
+    ui_puts("  An IPA is an application bundle: a GUI process built on UIKit and\r\n"
+            "  dozens of private frameworks. darwinnt executes command-line\r\n"
+            "  Darwin binaries. Running an IPA needs SpringBoard, the window\r\n"
+            "  server and those frameworks, not a better loader.\r\n");
+
+    free(data);
+    set_status(ipa.n_dylibs ? L"app bundle - not runnable here" : L"candidate");
+}
+
 /* ---- window procedure ---- */
 static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -236,6 +352,9 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_stop = CreateWindowW(L"BUTTON", L"Stop",
                                WS_CHILD | WS_VISIBLE | WS_DISABLED, 0, 0, 0, 0, hwnd,
                                (HMENU)IDC_STOP, NULL, NULL);
+        g_ipa = CreateWindowW(L"BUTTON", L"Inspect IPA...",
+                              WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
+                              (HMENU)IDC_IPA, NULL, NULL);
         g_output = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                    WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE |
                                    ES_READONLY | ES_AUTOVSCROLL,
@@ -310,6 +429,10 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 set_status(L"terminated by user");
             }
             return 0;
+        case IDC_IPA:
+        case IDM_IPA:
+            inspect_ipa(hwnd);
+            return 0;
         case IDM_EXIT:
             DestroyWindow(hwnd);
             return 0;
@@ -362,6 +485,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
 
     HMENU menu = CreateMenu();
     HMENU file = CreatePopupMenu();
+    AppendMenuW(file, MF_STRING, IDM_IPA, L"Inspect &IPA...\tCtrl+I");
     AppendMenuW(file, MF_STRING, IDM_ABOUT, L"&About");
     AppendMenuW(file, MF_SEPARATOR, 0, NULL);
     AppendMenuW(file, MF_STRING, IDM_EXIT, L"E&xit");

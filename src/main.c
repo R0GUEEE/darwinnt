@@ -17,6 +17,7 @@
 #include "dnt_syscall.h"
 #include "dnt_vfs.h"
 #include "dnt_exec.h"
+#include "dnt_ipa.h"
 #include "dnt_errno.h"
 #include "dnt_abi.h"
 
@@ -134,6 +135,33 @@ static int cmd_translate(const char *p)
 
 /* Filesystem smoke test using the real port backend. CI runs this on Windows
  * so the Win32 layer is executed, not just compiled. */
+static int cmd_ipa(const char *path)
+{
+    size_t len = 0;
+    uint8_t *data = read_file(path, &len);
+    if (!data) { fprintf(stderr, "cannot read %s\n", path); return 2; }
+    dnt_ipa ipa;
+    if (dnt_ipa_open(&ipa, data, len) != 0) {
+        fprintf(stderr, "ipa: %s\n", ipa.error);
+        free(data);
+        return 3;
+    }
+    printf("bundle      %s\n", ipa.bundle_id);
+    printf("name        %s\n", ipa.display_name);
+    printf("version     %s (min iOS %s)\n", ipa.version, ipa.min_os);
+    printf("executable  %s  %.1f MB\n", ipa.executable, ipa.exec_size / 1e6);
+    printf("arm64       %s\n", ipa.is_arm64 ? "yes" : "no");
+    printf("encrypted   %s\n",
+           (ipa.has_encryption_info && ipa.crypt_id) ? "yes (FairPlay)" : "no");
+    printf("frameworks  %d linked, %d bundled\n", ipa.n_dylibs, ipa.n_frameworks);
+    for (int i = 0; i < ipa.n_dylibs && i < 10; i++)
+        printf("  %s\n", ipa.dylibs[i]);
+    char v[512];
+    printf("\nverdict: %s\n", dnt_ipa_verdict(&ipa, v, sizeof(v)));
+    free(data);
+    return 0;
+}
+
 static int cmd_run(const char *path, int verbose)
 {
     size_t len = 0;
@@ -253,6 +281,7 @@ int main(int argc, char **argv)
             "  darwinnt --info <mach-o-binary>\n"
             "  darwinnt --translate <darwin-path>\n"
             "  darwinnt --run <darwin-binary>\n"
+            "  darwinnt --ipa <app.ipa>\n"
             "  darwinnt --test\n");
         return 1;
     }
@@ -260,6 +289,8 @@ int main(int argc, char **argv)
         return cmd_info(argv[2]);
     if (strcmp(argv[1], "--translate") == 0 && argc > 2)
         return cmd_translate(argv[2]);
+    if (strcmp(argv[1], "--ipa") == 0 && argc > 2)
+        return cmd_ipa(argv[2]);
     if (strcmp(argv[1], "--run") == 0 && argc > 2)
         return cmd_run(argv[2], argc > 3);
     if (strcmp(argv[1], "--test") == 0)

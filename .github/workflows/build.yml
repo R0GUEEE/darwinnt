@@ -29,8 +29,8 @@ jobs:
           & $gcc -std=c11 -Wall -Wextra -Wpedantic -O2 -static -Iinclude -Isrc `
             src/main.c src/dnt_macho.c src/dnt_path.c src/dnt_syscall.c `
             src/dnt_vfs.c src/dnt_port_win.c src/dnt_win.c `
-            src/dnt_cpu.c src/dnt_exec.c src/dnt_bind.c `
-            -o build/darwinnt.exe
+            src/dnt_cpu.c src/dnt_exec.c src/dnt_bind.c src/dnt_ipa.c src/dnt_plist.c `
+            -lz -o build/darwinnt.exe
           if ($LASTEXITCODE -ne 0) { throw "build failed" }
           & build\darwinnt.exe --test
           & build\darwinnt.exe --translate /var/tmp/example
@@ -64,8 +64,8 @@ jobs:
             -Iinclude -Isrc `
             src/gui_win.c src/dnt_macho.c src/dnt_path.c src/dnt_syscall.c `
             src/dnt_vfs.c src/dnt_port_win.c src/dnt_win.c `
-            src/dnt_cpu.c src/dnt_exec.c src/dnt_bind.c `
-            -lcomdlg32 -lgdi32 -luser32 -lshell32 `
+            src/dnt_cpu.c src/dnt_exec.c src/dnt_bind.c src/dnt_ipa.c src/dnt_plist.c `
+            -lcomdlg32 -lgdi32 -luser32 -lshell32 -lz `
             -o build\darwinnt-gui.exe
           if ($LASTEXITCODE -ne 0) { throw "gui build failed" }
           Get-Item build\darwinnt-gui.exe | Select-Object Name,Length
@@ -114,6 +114,7 @@ jobs:
               -o build_test_vfs
           $CC $I tests/test_syscalls_fs.c src/dnt_syscall.c src/dnt_vfs.c \
               src/dnt_path.c src/dnt_port_posix.c -o build_test_syscalls_fs
+          $CC $I tests/test_ipa.c src/dnt_ipa.c src/dnt_plist.c -o build_test_ipa -lz
           ./build_test_macho
           ./build_test_path
           ./build_test_syscall
@@ -123,6 +124,7 @@ jobs:
           ./build_test_vfs
           ./build_test_syscalls_fs
           ./build_test_exec
+          ./build_test_ipa
       - name: Fuzz the Mach-O parser
         run: |
           cat > fuzz_main.c <<'EOF'

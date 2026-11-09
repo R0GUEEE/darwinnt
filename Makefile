@@ -2,7 +2,7 @@
 CC      ?= gcc
 CFLAGS  ?= -std=c11 -Wall -Wextra -Wpedantic -O2
 CFLAGS  += -Iinclude -Isrc
-LDFLAGS ?=
+LDFLAGS ?= -lz
 # SAN=1 enables ASan/UBSan where the toolchain ships the runtime.
 ifeq ($(SAN),1)
 SANFLAGS = -g -fsanitize=address,undefined
@@ -11,7 +11,8 @@ SANFLAGS = -g
 endif
 
 SRC_COMMON = src/dnt_macho.c src/dnt_path.c src/dnt_syscall.c src/dnt_vfs.c \
-             src/dnt_port_posix.c src/dnt_cpu.c src/dnt_exec.c src/dnt_bind.c
+             src/dnt_port_posix.c src/dnt_cpu.c src/dnt_exec.c src/dnt_bind.c \
+             src/dnt_ipa.c src/dnt_plist.c
 SRC_HOST   = src/main.c $(SRC_COMMON)
 
 all: build/darwinnt
@@ -45,14 +46,17 @@ build/test_exec: tests/test_exec.c src/dnt_exec.c src/dnt_cpu.c src/dnt_syscall.
 	  src/dnt_syscall.c src/dnt_macho.c src/dnt_vfs.c src/dnt_path.c \
 	  src/dnt_port_posix.c src/dnt_bind.c -o $@
 
+build/test_ipa: tests/test_ipa.c src/dnt_ipa.c src/dnt_plist.c | build
+	$(CC) $(CFLAGS) $(SANFLAGS) $^ -o $@ -lz
+
 build/test_syscalls_fs: tests/test_syscalls_fs.c src/dnt_syscall.c src/dnt_vfs.c \
                         src/dnt_path.c src/dnt_port_posix.c src/generated/syscalls.h | build
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/test_syscalls_fs.c src/dnt_syscall.c src/dnt_vfs.c \
 	  src/dnt_path.c src/dnt_port_posix.c -o $@
 
-check: build/test_macho build/test_path build/test_syscall build/test_vfs build/test_syscalls_fs build/test_exec
+check: build/test_macho build/test_path build/test_syscall build/test_vfs build/test_syscalls_fs build/test_exec build/test_ipa
 	./build/test_macho && ./build/test_path && ./build/test_syscall \
-	  && ./build/test_vfs && ./build/test_syscalls_fs && ./build/test_exec
+	  && ./build/test_vfs && ./build/test_syscalls_fs && ./build/test_exec && ./build/test_ipa
 
 clean:
 	rm -rf build
