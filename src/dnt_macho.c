@@ -286,6 +286,9 @@ static void walk_chained(dnt_image *img, uint8_t *image, dnt_bind_cb cb, void *u
 {
     if (!img->chained_fixups || img->chained_fixups_size < 28)
         return;
+    /* The contract: image_at_base spans img->max_mapped bytes. Every pointer
+     * derived below is checked against that bound before being dereferenced. */
+    const uint64_t mapped = img->max_mapped;
     const uint8_t *base = img->chained_fixups;
     const uint64_t hdr_size = img->chained_fixups_size;
     uint32_t starts_off  = rd32(base + 4);
@@ -385,6 +388,13 @@ static void walk_chained(dnt_image *img, uint8_t *image, dnt_bind_cb cb, void *u
                  * corrupted blob would walk the chain through arbitrary
                  * memory. Refuse instead of trusting it. */
                 const dnt_seg *host_seg = NULL;
+                if (seg_mem_off > img->max_mapped) {
+                    /* Segment tables and the fixup blob are independent data
+                     * in the file. A corrupted one must not move the walk
+                     * outside the bytes the caller actually mapped. */
+                    img->unsupported_fixups++;
+                    continue;
+                }
                 for (int q = 0; q < img->nsegs; q++) {
                     if (seg_mem_off == img->segs[q].vaddr - img->base_vaddr) {
                         host_seg = &img->segs[q];
@@ -399,6 +409,8 @@ static void walk_chained(dnt_image *img, uint8_t *image, dnt_bind_cb cb, void *u
                  * allocated, so both the page and the chain inside it are
                  * clamped to memsz, not just to page_size. */
                 if ((uint64_t)pg * page_size >= host_seg->memsz)
+                    continue;
+                if (page_base + 8 > mapped)
                     continue;
                 uint64_t page_room = host_seg->memsz - (uint64_t)pg * page_size;
                 uint64_t eff_size = page_size < page_room ? page_size : page_room;
@@ -452,12 +464,19 @@ static void walk_chained(dnt_image *img, uint8_t *image, dnt_bind_cb cb, void *u
 /* ------------------------------------------------------------------ */
 /* Public loading entry point                                          */
 /* ------------------------------------------------------------------ */
-static int add_dylib(dnt_image *img, const char *name)
+/* `name` points into the file buffer and its length is bounded by the load
+ * command, not by a NUL we can trust: a malformed cmdsize can leave the name
+ * unterminated right up to EOF. Always pass the number of readable bytes. */
+static int add_dylib(dnt_image *img, const char *name, size_t name_cap)
 {
     if (img->ndylibs >= DNT_MAX_LOADS)
         return 0;
-    strncpy(img->dylibs[img->ndylibs], name, sizeof(img->dylibs[0]) - 1);
-    img->dylibs[img->ndylibs][sizeof(img->dylibs[0]) - 1] = 0;
+    size_t max = sizeof(img->dylibs[0]) - 1;
+    size_t n = 0;
+    while (n < name_cap && n < max && name[n])
+        n++;
+    memcpy(img->dylibs[img->ndylibs], name, n);
+    img->dylibs[img->ndylibs][n] = 0;
     return ++img->ndylibs;
 }
 
@@ -490,6 +509,29 @@ int dnt_macho_parse(const void *data, size_t len, dnt_image *img)
             LOAD_REC(dnt_segment_command_64, sc, p);
             if (img->nsegs >= DNT_MAX_SEGS)
                 break;
+            /* Reject implausible geometry before anything allocates against
+             * it. A corrupted vmaddr here becomes a max_mapped near 2^63, and
+             * every downstream size calculation then overflows. Real arm64
+             * user images live far below 2^47. */
+            /* Mach-O segments are laid out back to back; the loader maps one
+             * contiguous span starting at the first segment. Anything else is
+             * corruption and must not become a wild-sized allocation. */
+            if (sc.vmsize > DNT_MAX_SEG_SIZE ||
+                sc.vmaddr > (1ull << 47) ||
+                sc.vmaddr + sc.vmsize < sc.vmaddr ||
+                sc.vmaddr + sc.vmsize > (1ull << 47) ||
+                sc.filesize > len ||
+                sc.fileoff > len ||
+                (uint64_t)sc.fileoff + sc.filesize > len)
+                return DNT_E_TRUNCATED;
+            if (img->nsegs > 0) {
+                uint64_t base = img->segs[0].vaddr;
+                if (sc.vmaddr < base)
+                    return DNT_E_NOSEG;
+                /* gap between base and this segment must stay within the cap */
+                if (sc.vmaddr - base + sc.vmsize > DNT_MAX_IMAGE_SIZE)
+                    return DNT_E_TRUNCATED;
+            }
             dnt_seg *s = &img->segs[img->nsegs++];
             memcpy(s->segname, sc.segname, 16);
             s->segname[16] = 0;
@@ -515,9 +557,15 @@ int dnt_macho_parse(const void *data, size_t len, dnt_image *img)
             if (lc.cmdsize < sizeof(dl))
                 return DNT_E_TRUNCATED;
             LOAD_REC(dnt_dylib_command, dl, p);
-            if (dl.name_off && dl.name_off < lc.cmdsize)
-                strncpy(img->install_name, (const char *)(p + dl.name_off),
-                        sizeof(img->install_name) - 1);
+            if (dl.name_off && dl.name_off < lc.cmdsize) {
+                size_t cap = lc.cmdsize - dl.name_off;
+                size_t max = sizeof(img->install_name) - 1;
+                size_t n = 0;
+                while (n < cap && n < max && p[dl.name_off + n])
+                    n++;
+                memcpy(img->install_name, p + dl.name_off, n);
+                img->install_name[n] = 0;
+            }
             break;
         }
         case LC_LOAD_DYLIB:
@@ -527,9 +575,9 @@ int dnt_macho_parse(const void *data, size_t len, dnt_image *img)
             if (lc.cmdsize < sizeof(dl))
                 return DNT_E_TRUNCATED;
             LOAD_REC(dnt_dylib_command, dl, p);
-            if (dl.name_off && dl.name_off < lc.cmdsize &&
-                memchr(p + dl.name_off, 0, lc.cmdsize - dl.name_off))
-                add_dylib(img, (const char *)(p + dl.name_off));
+            if (dl.name_off && dl.name_off < lc.cmdsize)
+                add_dylib(img, (const char *)(p + dl.name_off),
+                          lc.cmdsize - dl.name_off);
             break;
         }
         case LC_DYLD_INFO:
@@ -562,6 +610,24 @@ int dnt_macho_parse(const void *data, size_t len, dnt_image *img)
     }
 
     img->base_vaddr = img->segs[0].vaddr;
+    if (img->max_mapped > DNT_MAX_IMAGE_SIZE)
+        return DNT_E_TRUNCATED;
+    /* Highest byte (relative to base) the caller must have mapped. A chain
+     * that reaches past this is reading outside the image, period. */
+    img->max_mapped = 0;
+    for (int i = 0; i < img->nsegs; i++) {
+        /* Segments must sit at or above the base. Subtracting a larger vmaddr
+         * from base underflows to ~2^64 and turns every later bound check into
+         * a no-op, which is exactly how a corrupt image smuggles a wild write
+         * past the guards. */
+        if (img->segs[i].vaddr < img->base_vaddr)
+            return DNT_E_NOSEG;
+        uint64_t end = (img->segs[i].vaddr - img->base_vaddr) + img->segs[i].memsz;
+        if (end < img->segs[i].memsz)   /* overflow */
+            return DNT_E_NOSEG;
+        if (end > img->max_mapped)
+            img->max_mapped = end;
+    }
     return 0;
 }
 

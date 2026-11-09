@@ -128,8 +128,14 @@ typedef struct dnt_image {
     const uint8_t *chained_fixups;
     uint64_t chained_fixups_size;
 
-    uint32_t unsupported_fixups; /* non-zero = image will likely fault; report */
+    uint64_t max_mapped;         /* bytes the caller must map from base_vaddr */
+    uint32_t unsupported_fixups;
 } dnt_image;
+
+/* A single Darwin image is never larger than this; used to reject corrupt
+ * segment tables before any size arithmetic. */
+#define DNT_MAX_IMAGE_SIZE (1ull << 34)   /* 16 GiB: generous for a userland image */
+#define DNT_MAX_SEG_SIZE   (1ull << 31)   /* 2 GiB: no userland segment is bigger */
 
 #define DYLD_CHAINED_PTR_START_NONE  0xFFFF
 #define DYLD_CHAINED_PTR_START_MULTI 0x8000
