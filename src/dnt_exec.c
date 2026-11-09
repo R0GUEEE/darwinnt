@@ -32,11 +32,17 @@ static uint8_t *map_region(uint64_t want, uint64_t *out_base, char *why, size_t 
      * elsewhere is a hard failure rather than a silent slide.
      *
      * A requested base of 0 means "anywhere", used only for the stack. */
+    /* VirtualAlloc rounds the *size* up to the 64 KiB allocation granularity
+     * internally, so asking for 16 KiB at 0x100000000 actually claims
+     * [0x100000000, 0x100010000). Request the same rounded size explicitly so
+     * the reserved extent is predictable and matches what the guest addresses
+     * cover. */
+    SIZE_T rounded = (SIZE_T)((want + 0xFFFF) & ~(uint64_t)0xFFFF);
     void *p;
     if (*out_base == 0) {
-        p = VirtualAlloc(NULL, (SIZE_T)want, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        p = VirtualAlloc(NULL, rounded, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     } else {
-        p = VirtualAlloc((void *)(uintptr_t)*out_base, (SIZE_T)want,
+        p = VirtualAlloc((void *)(uintptr_t)*out_base, rounded,
                          MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     }
     if (!p) {
