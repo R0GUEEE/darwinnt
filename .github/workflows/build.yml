@@ -46,11 +46,11 @@ jobs:
           # separates "crashes at startup" from "crashes in the interpreter".
           & build\darwinnt.exe --info tests\fixtures\hello.macho
           Write-Host "info exit=$LASTEXITCODE"
-          & build\darwinnt.exe --run tests\fixtures\hello.macho
-          Write-Host "run exit=$LASTEXITCODE"
+          $h = Start-Process -FilePath build\darwinnt.exe -ArgumentList "--run","tests\fixtures\hello.macho" -NoNewWindow -Wait -PassThru
+          Write-Host "run exit=$($h.ExitCode)"
           if ($LASTEXITCODE -ne 0) { throw "hello.macho failed" }
-          & build\darwinnt.exe --run tests\fixtures\exitcode.macho
-          $code = $LASTEXITCODE
+          $e = Start-Process -FilePath build\darwinnt.exe -ArgumentList "--run","tests\fixtures\exitcode.macho" -NoNewWindow -Wait -PassThru
+          $code = $e.ExitCode
           Write-Host "exitcode.macho returned $code"
           if ($code -ne 42) { throw "exitcode.macho returned $code, expected 42" }
           Get-Item build\darwinnt.exe | Select-Object Name,Length
