@@ -1,0 +1,89 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: windows-x64 (MinGW)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Regenerate syscall table
+        shell: pwsh
+        run: |
+          python tools/gen_syscalls.py spec/master.txt src/generated/syscalls.h
+          Get-Content src/generated/syscalls.h -TotalCount 4
+
+      - name: Build darwinnt.exe
+        shell: pwsh
+        run: |
+          choco install mingw --no-progress -y
+          $gcc = "C:\ProgramData\chocolatey\bin\x86_64-w64-mingw32-gcc.exe"
+          if (!(Test-Path $gcc)) { $gcc = (Get-Command x86_64-w64-mingw32-gcc).Source }
+          New-Item -ItemType Directory -Force build | Out-Null
+          & $gcc -std=c11 -Wall -Wextra -Wpedantic -O2 -static -Iinclude -Isrc `
+            src/main.c src/dnt_macho.c src/dnt_path.c src/dnt_syscall.c src/dnt_win.c `
+            -o build/darwinnt.exe
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+          & build\darwinnt.exe --test
+          & build\darwinnt.exe --translate /var/tmp/example
+          Get-Item build\darwinnt.exe | Select-Object Name,Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwinnt-windows-x64
+          path: build/darwinnt.exe
+          if-no-files-found: error
+
+  tests:
+    name: host tests (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Regenerate syscall table
+        run: python3 tools/gen_syscalls.py spec/master.txt src/generated/syscalls.h
+      - name: Build and run suites
+        run: |
+          set -e
+          CC="gcc -std=c11 -Wall -Wextra -Wpedantic -O1 -g -fsanitize=address,undefined"
+          I="-Iinclude -Isrc"
+          $CC $I tests/test_macho.c tests/fixture.c src/dnt_macho.c -o build_test_macho
+          $CC $I tests/test_path.c src/dnt_path.c -o build_test_path
+          $CC $I tests/test_syscall.c src/dnt_syscall.c -o build_test_syscall
+          ./build_test_macho
+          ./build_test_path
+          ./build_test_syscall
+      - name: Fuzz the Mach-O parser
+        run: |
+          cat > fuzz_main.c <<'EOF'
+          #include "dnt_macho.h"
+          #include "dnt_fixture.h"
+          #include <stdlib.h>
+          #include <string.h>
+          #include <stdio.h>
+          static void cb(void*u,uint64_t s,const char*n,int64_t a){(void)u;(void)s;(void)n;(void)a;}
+          int main(void){
+            srand(1);
+            for(int iter=0;iter<20000;iter++){
+              dnt_fixture fx; dnt_fixture_chained(&fx,"_write");
+              int n=1+rand()%8;
+              for(int i=0;i<n;i++) fx.data[rand()%fx.len]^=(uint8_t)(1+rand()%255);
+              dnt_image img;
+              if(dnt_macho_parse(fx.data,fx.len,&img)==0){
+                uint8_t*copy=malloc(fx.len); memcpy(copy,fx.data,fx.len);
+                dnt_macho_apply_fixups(&img,copy,cb,NULL); free(copy);
+              }
+              dnt_fixture_free(&fx);
+            }
+            printf("fuzz: 20000 mutated images, no crash\n");
+            return 0;
+          }
+          EOF
+          gcc -std=c11 -O1 -g -fsanitize=address,undefined -Iinclude -Isrc \
+            fuzz_main.c tests/fixture.c src/dnt_macho.c -o build_fuzz
+          ./build_fuzz

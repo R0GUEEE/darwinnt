@@ -1,0 +1,36 @@
+# Host build (Linux/macOS). The Windows target is built in CI with MinGW.
+CC      ?= gcc
+CFLAGS  ?= -std=c11 -Wall -Wextra -Wpedantic -O2
+CFLAGS  += -Iinclude -Isrc
+LDFLAGS ?=
+
+SRC_COMMON = src/dnt_macho.c src/dnt_path.c src/dnt_syscall.c
+SRC_HOST   = src/main.c $(SRC_COMMON)
+
+all: build/darwinnt
+
+src/generated/syscalls.h: spec/master.txt tools/gen_syscalls.py
+	python3 tools/gen_syscalls.py spec/master.txt $@
+
+build:
+	mkdir -p build
+
+build/darwinnt: $(SRC_HOST) src/generated/syscalls.h | build
+	$(CC) $(CFLAGS) $(SRC_HOST) -o $@ $(LDFLAGS)
+
+build/test_macho: tests/test_macho.c tests/fixture.c src/dnt_macho.c src/generated/syscalls.h | build
+	$(CC) $(CFLAGS) -g -fsanitize=address,undefined $^ -o $@
+
+build/test_path: tests/test_path.c src/dnt_path.c | build
+	$(CC) $(CFLAGS) -g -fsanitize=address,undefined $^ -o $@
+
+build/test_syscall: tests/test_syscall.c src/dnt_syscall.c src/generated/syscalls.h | build
+	$(CC) $(CFLAGS) -g -fsanitize=address,undefined $^ -o $@
+
+check: build/test_macho build/test_path build/test_syscall
+	./build/test_macho && ./build/test_path && ./build/test_syscall
+
+clean:
+	rm -rf build
+
+.PHONY: all check clean
