@@ -23,6 +23,17 @@
 /* ------------------------------------------------------------------ */
 static uint32_t rd32(const void *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 static uint64_t rd64(const void *p) { uint64_t v; memcpy(&v, p, 8); return v; }
+static uint16_t rd16(const void *p) { uint16_t v; memcpy(&v, p, 2); return v; }
+
+/* Load commands and fixup records are packed at file offsets, which are only
+ * guaranteed to be 8-byte aligned for well-formed files. A malformed or
+ * concatenated image puts them on odd offsets; casting to a struct pointer
+ * there is undefined behaviour (and a fault on strict-alignment targets), so
+ * every record is copied out through these helpers before being read. */
+#define LOAD_REC(type, dst, src) do { \
+    memset(&(dst), 0, sizeof(dst)); \
+    memcpy(&(dst), (src), sizeof(dst)); \
+} while (0)
 
 /* Virtual memory the guest can reach. On Win64 we reserve one large region at
  * a chosen base and hand out image slots from it, so that a 32-bit-relative
@@ -83,17 +94,19 @@ uint64_t dnt_macho_vmsize(const void *data, size_t len, dnt_macho_header_out *ou
     const uint8_t *p = (const uint8_t *)data + sizeof(*mh);
     uint64_t max_end = 0;
     for (uint32_t i = 0; i < mh->ncmds; i++) {
-        const dnt_load_command *lc = (const void *)p;
-        if (lc->cmdsize < sizeof(*lc) ||
-            (uint64_t)(p - (const uint8_t *)data) + lc->cmdsize > len)
+        dnt_load_command lc;
+        LOAD_REC(dnt_load_command, lc, p);
+        if (lc.cmdsize < sizeof(lc) ||
+            (uint64_t)(p - (const uint8_t *)data) + lc.cmdsize > len)
             break;
-        if (lc->cmd == LC_SEGMENT_64) {
-            const dnt_segment_command_64 *sc = (const void *)p;
-            uint64_t end = sc->vmaddr + sc->vmsize;
+        if (lc.cmd == LC_SEGMENT_64 && lc.cmdsize >= sizeof(dnt_segment_command_64)) {
+            dnt_segment_command_64 sc;
+            LOAD_REC(dnt_segment_command_64, sc, p);
+            uint64_t end = sc.vmaddr + sc.vmsize;
             if (end > max_end)
                 max_end = end;
         }
-        p += lc->cmdsize;
+        p += lc.cmdsize;
     }
     /* Page-align and add a guard page so a wild write traps instead of
      * silently corrupting the next mapping. */
@@ -305,11 +318,11 @@ static void walk_chained(dnt_image *img, uint8_t *image, dnt_bind_cb cb, void *u
          * mach-o/fixup-chains.h:
          *   size0 page_size4 pointer_format6 segment_offset8
          *   max_valid_pointer16 page_count20 page_start[]22 */
-        uint16_t page_size    = *(const uint16_t *)(si + 4);
-        uint16_t ptr_format   = *(const uint16_t *)(si + 6);
+        uint16_t page_size    = rd16(si + 4);
+        uint16_t ptr_format   = rd16(si + 6);
         uint64_t seg_mem_off  = rd64(si + 8);   /* offset of segment in memory */
-        uint16_t page_count   = *(const uint16_t *)(si + 20);
-        const uint16_t *page_start = (const uint16_t *)(si + 22);
+        uint16_t page_count   = rd16(si + 20);
+        const uint8_t *page_start = si + 22;   /* u16 array, read via rd16 */
 
         /* page_start[] and chain_starts[] must lie wholly inside the blob. */
         uint64_t seg_rec_off = (uint64_t)(si - base);
@@ -336,11 +349,10 @@ static void walk_chained(dnt_image *img, uint8_t *image, dnt_bind_cb cb, void *u
         }
 
         /* chain_starts[] begins right after page_start[page_count]. */
-        const uint16_t *chain_starts =
-            (const uint16_t *)(si + 22 + (uint64_t)page_count * 2);
+        const uint8_t *chain_starts = si + 22 + (uint64_t)page_count * 2;
 
         for (uint32_t pg = 0; pg < page_count; pg++) {
-            uint16_t st = page_start[pg];
+            uint16_t st = rd16(page_start + (uint64_t)pg * 2);
             if (st == DYLD_CHAINED_PTR_START_NONE)
                 continue;
 
@@ -357,7 +369,7 @@ static void walk_chained(dnt_image *img, uint8_t *image, dnt_bind_cb cb, void *u
                 for (int k = 0; k < 64 && n_starts < 64; k++) {
                     if ((uint64_t)idx + k >= cs_max)
                         break;
-                    uint16_t e = chain_starts[idx + k];
+                    uint16_t e = rd16(chain_starts + (uint64_t)(idx + k) * 2);
                     starts_local[n_starts++] = e & ~DYLD_CHAINED_PTR_START_LAST;
                     if (e & DYLD_CHAINED_PTR_START_LAST)
                         break;
@@ -381,15 +393,26 @@ static void walk_chained(dnt_image *img, uint8_t *image, dnt_bind_cb cb, void *u
                 }
                 if (!host_seg)
                     continue;
-                if ((uint64_t)(pg + 1) * page_size > host_seg->memsz)
+                /* The blob supplies a trusted-looking segment_offset but the
+                 * image's real extent is memsz. A page_start/(size) pair from
+                 * a corrupted file can point past the segment the caller
+                 * allocated, so both the page and the chain inside it are
+                 * clamped to memsz, not just to page_size. */
+                if ((uint64_t)pg * page_size >= host_seg->memsz)
                     continue;
-                uint8_t *slot = image_base + page_base + (starts_local[k] & 0x7FFF);
-                /* Chain must stay within this page: a corrupt `next` stride
-                 * would otherwise walk into unmapped memory. */
-                uint8_t *page_end = image_base + page_base + page_size;
+                uint64_t page_room = host_seg->memsz - (uint64_t)pg * page_size;
+                uint64_t eff_size = page_size < page_room ? page_size : page_room;
+                if (eff_size < 8)
+                    continue;
+                uint64_t start_off = starts_local[k] & 0x7FFF;
+                if (start_off + 8 > eff_size)
+                    continue;
+                uint8_t *seg_base = image_base + page_base;
+                uint8_t *slot = seg_base + start_off;
+                uint8_t *page_end = seg_base + eff_size;
                 int guard = 0;
                 for (;;) {
-                    if (slot < image_base + page_base || slot + 8 > page_end)
+                    if (slot < seg_base || slot + 8 > page_end)
                         break;
                     if (++guard > 65536)
                         break;
@@ -454,67 +477,88 @@ int dnt_macho_parse(const void *data, size_t len, dnt_image *img)
     const uint8_t *limit = (const uint8_t *)data + len;
 
     for (uint32_t i = 0; i < mh->ncmds; i++) {
-        const dnt_load_command *lc = (const void *)p;
-        if (lc->cmdsize < sizeof(*lc) || p + lc->cmdsize > limit)
+        dnt_load_command lc;
+        LOAD_REC(dnt_load_command, lc, p);
+        if (lc.cmdsize < sizeof(lc) || p + lc.cmdsize > limit)
             return DNT_E_TRUNCATED;
 
-        switch (lc->cmd) {
+        switch (lc.cmd) {
         case LC_SEGMENT_64: {
-            const dnt_segment_command_64 *sc = (const void *)p;
+            dnt_segment_command_64 sc;
+            if (lc.cmdsize < sizeof(sc))
+                return DNT_E_TRUNCATED;
+            LOAD_REC(dnt_segment_command_64, sc, p);
             if (img->nsegs >= DNT_MAX_SEGS)
                 break;
             dnt_seg *s = &img->segs[img->nsegs++];
-            memcpy(s->segname, sc->segname, 16);
+            memcpy(s->segname, sc.segname, 16);
             s->segname[16] = 0;
-            s->vaddr = sc->vmaddr;
-            s->memsz = sc->vmsize;
-            s->fileoff = sc->fileoff;
-            s->filesz = sc->filesize;
-            s->initprot = sc->initprot;
-            s->maxprot = sc->maxprot;
+            s->vaddr = sc.vmaddr;
+            s->memsz = sc.vmsize;
+            s->fileoff = sc.fileoff;
+            s->filesz = sc.filesize;
+            s->initprot = sc.initprot;
+            s->maxprot = sc.maxprot;
             break;
         }
         case LC_MAIN: {
-            const dnt_entry_point_command *ep = (const void *)p;
-            img->entry_off = ep->entryoff;
+            dnt_entry_point_command ep;
+            if (lc.cmdsize < sizeof(ep))
+                return DNT_E_TRUNCATED;
+            LOAD_REC(dnt_entry_point_command, ep, p);
+            img->entry_off = ep.entryoff;
             img->has_main = 1;
             break;
         }
         case LC_ID_DYLIB: {
-            const dnt_dylib_command *dl = (const void *)p;
-            uint32_t no = dl->name_off;
-            if (no && no < lc->cmdsize)
-                strncpy(img->install_name, (const char *)(p + no),
+            dnt_dylib_command dl;
+            if (lc.cmdsize < sizeof(dl))
+                return DNT_E_TRUNCATED;
+            LOAD_REC(dnt_dylib_command, dl, p);
+            if (dl.name_off && dl.name_off < lc.cmdsize)
+                strncpy(img->install_name, (const char *)(p + dl.name_off),
                         sizeof(img->install_name) - 1);
             break;
         }
         case LC_LOAD_DYLIB:
         case LC_LOAD_WEAK_DYLIB:
         case LC_REEXPORT_DYLIB: {
-            const dnt_dylib_command *dl = (const void *)p;
-            uint32_t no = dl->name_off;
-            if (no && no < lc->cmdsize)
-                add_dylib(img, (const char *)(p + no));
+            dnt_dylib_command dl;
+            if (lc.cmdsize < sizeof(dl))
+                return DNT_E_TRUNCATED;
+            LOAD_REC(dnt_dylib_command, dl, p);
+            if (dl.name_off && dl.name_off < lc.cmdsize &&
+                memchr(p + dl.name_off, 0, lc.cmdsize - dl.name_off))
+                add_dylib(img, (const char *)(p + dl.name_off));
             break;
         }
         case LC_DYLD_INFO:
         case LC_DYLD_INFO_ONLY:
-            memcpy(&img->info, p, sizeof(img->info));
+            if (lc.cmdsize < sizeof(dnt_dyld_info_command))
+                return DNT_E_TRUNCATED;
+            LOAD_REC(dnt_dyld_info_command, img->info, p);
+            /* the blob offsets must live inside the file */
+            if ((uint64_t)img->info.bind_off + img->info.bind_size > len ||
+                (uint64_t)img->info.lazy_bind_off + img->info.lazy_bind_size > len)
+                return DNT_E_TRUNCATED;
             img->dyld_info = data;
             img->has_dyld_info = 1;
             break;
         case LC_DYLD_CHAINED_FIXUPS: {
-            const dnt_linkedit_data_command *ld = (const void *)p;
-            if ((uint64_t)ld->dataoff + ld->datasize <= len) {
-                img->chained_fixups = (const uint8_t *)data + ld->dataoff;
-                img->chained_fixups_size = ld->datasize;
+            dnt_linkedit_data_command ld;
+            if (lc.cmdsize < sizeof(ld))
+                return DNT_E_TRUNCATED;
+            LOAD_REC(dnt_linkedit_data_command, ld, p);
+            if ((uint64_t)ld.dataoff + ld.datasize <= len) {
+                img->chained_fixups = (const uint8_t *)data + ld.dataoff;
+                img->chained_fixups_size = ld.datasize;
             }
             break;
         }
         default:
             break;
         }
-        p += lc->cmdsize;
+        p += lc.cmdsize;
     }
 
     img->base_vaddr = img->segs[0].vaddr;
