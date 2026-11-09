@@ -76,14 +76,22 @@ static DWORD g_exit_code = 0;
 static volatile LONG g_exiting = 0;
 static FILE *g_verbose;
 
+/* When the interpreter drives the guest, exit() must NOT terminate the host:
+ * the CPU loop has to observe the halt, unwind its stack, free the image, and
+ * the CLI has to return the guest's code to the caller. In that mode the hook
+ * records and returns; standalone mode keeps ExitProcess. */
+static volatile LONG g_in_interpreter;
+
+void dnt_win_set_interpreter_mode(int on) { InterlockedExchange(&g_in_interpreter, on ? 1 : 0); }
+
 static void win_exit(int code)
 {
-    /* A guest exit must unwind through Windows' own teardown so atexit-style
-     * finalisers the host owns (log flush, handle close) still run. */
     g_exit_code = (DWORD)code;
     InterlockedExchange(&g_exiting, 1);
     if (g_verbose)
         fflush(g_verbose);
+    if (g_in_interpreter)
+        return;
     ExitProcess((UINT)code);
 }
 

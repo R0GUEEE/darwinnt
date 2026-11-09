@@ -7,5 +7,6 @@ const dnt_host_ops *dnt_win_host_ops(void);
 void dnt_win_set_verbose(FILE *f);
 int  dnt_win_is_exiting(void);
 unsigned long dnt_win_exit_code(void);
+void dnt_win_set_interpreter_mode(int on);
 #endif
 #endif

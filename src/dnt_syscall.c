@@ -369,6 +369,7 @@ uint64_t dnt_syscall(uint32_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
 dnt_result dnt_syscall_r(uint32_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
                          uint64_t a3, uint64_t a4, uint64_t a5)
 {
+    (void)a5;   /* no implemented call takes a sixth argument yet */
     if (nr > DSYS_MAX_SYSCALL) {
         if (g_ops.unimplemented)
             g_ops.unimplemented(nr, "out-of-range");

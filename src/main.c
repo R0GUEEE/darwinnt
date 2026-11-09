@@ -145,8 +145,16 @@ static int cmd_run(const char *path, int verbose)
     const char *root = getenv("DARWINNT_ROOT");
     if (!root || !*root) root = DEFAULT_ROOT;
 
+#ifdef _WIN32
+    /* The guest's exit() must not kill the process before the image and stack
+     * are released; let the interpreter observe the halt instead. */
+    dnt_win_set_interpreter_mode(1);
+#endif
     dnt_exec_result r;
     int rc = dnt_exec_image(data, len, root, verbose, &r);
+#ifdef _WIN32
+    dnt_win_set_interpreter_mode(0);
+#endif
     free(data);
     if (rc != 0) {
         fprintf(stderr, "darwinnt: %s\n", r.detail);
