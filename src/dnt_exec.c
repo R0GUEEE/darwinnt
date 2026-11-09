@@ -24,10 +24,17 @@
 static uint8_t *map_region(uint64_t want, uint64_t *out_base)
 {
 #ifdef _WIN32
+    /* Prefer the address the image was linked at, so absolute references and
+     * the guest's own PC arithmetic agree with the file. If that address is
+     * taken (ASLR, another module), map anywhere and let the executor resolve
+     * addresses against where it actually landed. */
     void *p = VirtualAlloc((void *)(uintptr_t)*out_base, (SIZE_T)want,
                            MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (!p)
+        p = VirtualAlloc(NULL, (SIZE_T)want, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!p)
         return NULL;
+    *out_base = (uint64_t)(uintptr_t)p;
     return (uint8_t *)p;
 #else
     void *p = aligned_alloc(4096, (size_t)((want + 0xFFF) & ~0xFFFull));
@@ -104,8 +111,10 @@ int dnt_exec_image(const uint8_t *file, size_t file_len, const char *root,
         memcpy(mem + off, file + s->fileoff, (size_t)s->filesz);
     }
 
+    /* The host stack is not inside the guest image, so it is allocated
+     * wherever the OS likes; nothing in the guest refers to it by address. */
     const uint64_t stack_size = 1 << 16;
-    uint64_t stack_base = (image_base + image_size + 0x100000) & ~0xFFFFull;
+    uint64_t stack_base = 0;
     uint8_t *stack = map_region(stack_size, &stack_base);
     if (!stack) {
         unmap_region(mem, image_size);
